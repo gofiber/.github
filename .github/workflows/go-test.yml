@@ -1,0 +1,100 @@
+name: go-test
+
+on:
+  workflow_call:
+    inputs:
+      go-versions:
+        description: JSON array of Go versions for the test matrix
+        required: false
+        default: '["1.25.x"]'
+        type: string
+      platforms:
+        description: JSON array of platforms to test against
+        required: false
+        default: '["ubuntu-latest", "windows-latest", "macos-latest"]'
+        type: string
+      working-directory:
+        description: Path to the module to test
+        required: false
+        default: '.'
+        type: string
+      package-pattern:
+        description: Go package pattern to test
+        required: false
+        default: ./...
+        type: string
+      codecov-flags:
+        description: Flags to pass to Codecov uploads
+        required: false
+        default: unittests
+        type: string
+      codecov-slug:
+        description: Repository slug to use for Codecov uploads
+        required: false
+        default: ${{ github.repository }}
+        type: string
+      enable-codecov:
+        description: Upload coverage reports to Codecov for Linux runs
+        required: false
+        default: true
+        type: boolean
+      enable-repeated:
+        description: Run the repeated stress test job
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      codecov-token:
+        description: Token for Codecov uploads
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ${{ fromJson(inputs.go-versions) }}
+        platform: ${{ fromJson(inputs.platforms) }}
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Test
+        working-directory: ${{ inputs.working-directory }}
+        run: go run gotest.tools/gotestsum@latest -f testname -- ${{ inputs.package-pattern }} -race -count=1 -coverprofile=coverage.txt -covermode=atomic -shuffle=on
+
+      - name: Upload coverage reports to Codecov
+        if: ${{ inputs.enable-codecov && matrix.platform == 'ubuntu-latest' }}
+        uses: codecov/codecov-action@5a1091511ad55cbe89839c7260b706298ca349f7 # v5.5.1
+        with:
+          token: ${{ secrets.codecov-token }}
+          flags: ${{ inputs.codecov-flags }}
+          slug: ${{ inputs.codecov-slug }}
+          verbose: true
+          files: ${{ inputs.working-directory }}/coverage.txt
+
+  repeated:
+    if: inputs.enable-repeated == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Install Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: stable
+
+      - name: Test
+        working-directory: ${{ inputs.working-directory }}
+        run: go run gotest.tools/gotestsum@latest -f testname -- ${{ inputs.package-pattern }} -race -count=15 -shuffle=on

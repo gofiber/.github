@@ -1,0 +1,79 @@
+name: security-golang
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: Path to the Go module to scan
+        required: false
+        default: '.'
+        type: string
+      run-govulncheck:
+        description: Run govulncheck against the module
+        required: false
+        default: true
+        type: boolean
+      run-codeql:
+        description: Run CodeQL analysis for Go
+        required: false
+        default: false
+        type: boolean
+      go-version:
+        description: Go version for govulncheck
+        required: false
+        default: 'stable'
+        type: string
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  govulncheck:
+    if: inputs.run-govulncheck == true
+    runs-on: ubuntu-latest
+    env:
+      GO111MODULE: on
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          check-latest: true
+          cache: false
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        working-directory: ${{ inputs.working-directory }}
+        run: govulncheck ./...
+
+  codeql:
+    if: inputs.run-codeql == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: go
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3

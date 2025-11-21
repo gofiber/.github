@@ -1,0 +1,29 @@
+name: dependabot-automerge
+
+on:
+  workflow_call:
+    secrets:
+      github-token:
+        description: Token with `pull_requests:write` and `contents:write` permissions
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    runs-on: ubuntu-latest
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      - name: Fetch metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.github-token != '' && secrets.github-token || secrets.GITHUB_TOKEN }}
+
+      - name: Enable auto-merge
+        env:
+          GITHUB_TOKEN: ${{ secrets.github-token != '' && secrets.github-token || secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge --auto --merge "$PR_URL"

@@ -1,0 +1,86 @@
+name: sync-docs
+
+on:
+  workflow_call:
+    inputs:
+      source-path:
+        description: Path in the source repository to sync
+        required: true
+        type: string
+      destination-repo:
+        description: Target repository in the form owner/name
+        required: true
+        type: string
+      destination-branch:
+        description: Target branch in the destination repository
+        required: false
+        default: main
+        type: string
+      destination-path:
+        description: Path inside the destination repository where files will be written
+        required: false
+        default: docs
+        type: string
+      commit-message:
+        description: Commit message to use in the destination repository
+        required: false
+        default: chore: sync docs
+        type: string
+      git-user-name:
+        description: Git user.name for the commit
+        required: false
+        default: github-actions[bot]
+        type: string
+      git-user-email:
+        description: Git user.email for the commit
+        required: false
+        default: github-actions[bot]@users.noreply.github.com
+        type: string
+    secrets:
+      destination-token:
+        description: Token with push access to the destination repository
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout destination repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.destination-repo }}
+          ref: ${{ inputs.destination-branch }}
+          path: destination
+          token: ${{ secrets.destination-token }}
+
+      - name: Prepare destination path
+        run: |
+          set -euo pipefail
+          if [ ! -d "source/${{ inputs.source-path }}" ]; then
+            echo "Source path source/${{ inputs.source-path }} not found" >&2
+            exit 1
+          fi
+          mkdir -p "destination/${{ inputs.destination-path }}"
+          rsync -av --delete "source/${{ inputs.source-path }}/" "destination/${{ inputs.destination-path }}/"
+
+      - name: Commit and push changes
+        working-directory: destination
+        run: |
+          set -euo pipefail
+          git config user.name "${{ inputs.git-user-name }}"
+          git config user.email "${{ inputs.git-user-email }}"
+          if git diff --quiet; then
+            echo "No changes to sync"
+            exit 0
+          fi
+          git add -A
+          git commit -m "${{ inputs.commit-message }}"
+          git push origin HEAD:${{ inputs.destination-branch }}

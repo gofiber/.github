@@ -1,0 +1,81 @@
+name: go-lint
+
+on:
+  workflow_call:
+    inputs:
+      go-version:
+        description: Go version to use for linting
+        required: false
+        default: '1.25.x'
+        type: string
+      working-directory:
+        description: Path to the module to lint
+        required: false
+        default: '.'
+        type: string
+      golangci-version:
+        description: golangci-lint version to install
+        required: false
+        default: v2.5.0
+        type: string
+      config-path:
+        description: Path to the golangci-lint configuration file
+        required: false
+        default: .github/.golangci.yml
+        type: string
+      config-repository:
+        description: Repository that stores the shared golangci-lint configuration
+        required: false
+        default: gofiber/.github
+        type: string
+      config-ref:
+        description: Git ref for the shared golangci-lint configuration
+        required: false
+        default: main
+        type: string
+      use-shared-config:
+        description: Fetch the shared golangci-lint configuration from this repository
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          cache: false
+
+      - name: Fetch shared golangci-lint config
+        if: inputs.use-shared-config == true
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          repository: ${{ inputs.config-repository }}
+          ref: ${{ inputs.config-ref }}
+          path: _golangci_config
+
+      - name: Copy shared config
+        if: inputs.use-shared-config == true
+        run: |
+          mkdir -p "$(dirname '${{ inputs.config-path }}')"
+          cp "_golangci_config/${{ inputs.config-path }}" "${{ inputs.config-path }}"
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@0a35821d5c230e903fcfe077583637dea1b27b47 # v9.0.0
+        with:
+          version: ${{ inputs.golangci-version }}
+          install-mode: goinstall
+          working-directory: ${{ inputs.working-directory }}
+          args: --config=${{ inputs.config-path }}
