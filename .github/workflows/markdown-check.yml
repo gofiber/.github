@@ -1,0 +1,34 @@
+name: markdown-check
+
+on:
+  workflow_call:
+    inputs:
+      globs:
+        description: Newline-separated globs passed to markdownlint-cli2
+        required: false
+        default: |
+          **/*.md
+          #vendor
+        type: string
+      config:
+        description: Optional path to a markdownlint config file
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  markdownlint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+
+      - name: Run markdownlint-cli2
+        uses: DavidAnson/markdownlint-cli2-action@30a0e04f1870d58f8d717450cc6134995f993c63 # v21.0.0
+        with:
+          globs: ${{ inputs.globs }}
+          config: ${{ inputs.config }}

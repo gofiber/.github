@@ -1,0 +1,42 @@
+name: auto-labeler
+
+on:
+  workflow_call:
+    inputs:
+      config-path:
+        description: Path to the shared labeler configuration file
+        required: false
+        default: .github/labeler.yml
+        type: string
+      config-repository:
+        description: Repository that stores the shared labeler configuration
+        required: false
+        default: gofiber/.github
+        type: string
+      config-ref:
+        description: Ref to use when fetching the shared label configuration
+        required: false
+        default: main
+        type: string
+    secrets:
+      github-token:
+        description: Token with `pull_requests:write` and `issues:write` permissions (e.g., ISSUE_PR_TOKEN)
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  labeler:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Apply labels
+        id: labeler
+        uses: fuxingloh/multi-labeler@b15a54460c38f54043fa75f7b08a0e2aa5b94b5b # v4.0.0
+        with:
+          github-token: ${{ secrets.github-token != '' && secrets.github-token || secrets.GITHUB_TOKEN }}
+          config-path: ${{ inputs.config-path }}
+          config-repo: ${{ inputs.config-repository }}
+          config-ref: ${{ inputs.config-ref }}
