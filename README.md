@@ -33,7 +33,7 @@ Runs Release Drafter with a configurable config path fetched from this repo by d
 - Secrets: optional `release-token` with `contents:write` permission; otherwise uses the default token.
 
 ### auto-labeler
-Applies labels from the shared configuration in this repository.
+Applies labels from the shared configuration in this repository using the [`gofiber/multi-labeler`](https://github.com/gofiber/multi-labeler) action. The base configuration captures labels common to `gofiber/contrib` and `gofiber/fiber`; repository-specific rules (for example, versioned branches in `gofiber/fiber`) should be added via a repo-local `labeler.yml` that extends this shared file.
 - Inputs: `config-path` (default `.github/labeler.yml`), `config-repository` (default `gofiber/.github`), `config-ref` (default `main`).
 - Secrets: optional `github-token` with `pull_requests:write` and `issues:write`; otherwise uses the default token.
 
