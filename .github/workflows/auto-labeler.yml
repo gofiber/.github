@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Apply labels
         id: labeler
-        uses: fuxingloh/multi-labeler@b15a54460c38f54043fa75f7b08a0e2aa5b94b5b # v4.0.0
+        uses: gofiber/multi-labeler@v0.1.0
         with:
           github-token: ${{ secrets.github-token != '' && secrets.github-token || secrets.GITHUB_TOKEN }}
           config-path: ${{ inputs.config-path }}
