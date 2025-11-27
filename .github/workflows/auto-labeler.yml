@@ -39,4 +39,3 @@ jobs:
           github-token: ${{ secrets.github-token != '' && secrets.github-token || secrets.GITHUB_TOKEN }}
           config-path: ${{ inputs.config-path }}
           config-repo: ${{ inputs.config-repository }}
-          config-ref: ${{ inputs.config-ref }}
