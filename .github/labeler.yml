@@ -10,7 +10,7 @@ labels:
 
   - label: '🧹 Updates'
     matcher:
-      title: '/(improve|chore|improvements|missing|update|refactor|deprecated|remove|unused|test)/i'
+      title: '/(improve|improvements|missing|update|refactor|deprecated|remove|unused|test)/i'
 
   - label: '🤖 Dependencies'
     matcher:
