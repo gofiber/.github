@@ -18,7 +18,7 @@ labels:
 
   - label: '🧹 Updates'
     matcher:
-      title: '/^((chore|refactor|perf|test|build|ci|style)(\([^)]+\))?!?:|[^:]*(improv\w*|missing|updates?|refactor\w*|deprecated|remove(d|s)?|unused|tests?))/i'
+      title: '/^((chore|refactor|perf|test|build|ci|style)(\([^)]+\))?!?:|[^:]*(improve(ments?|d|s|ing)?|missing|updates?|refactor(s|ed|ing)?|deprecated|remove(d|s)?|unused|tests?))/i'
 
   - label: '🤖 Dependencies'
     matcher:
@@ -29,7 +29,7 @@ labels:
 
   - label: '✏️ Feature'
     matcher:
-      title: '/^(feat(\([^)]+\))?!?:|[^:]*(features?|create(d|s)?|implement\w*|add(ed|s|ing)?|support\w*))/i'
+      title: '/^(feat(\([^)]+\))?!?:|[^:]*(features?|create(d|s)?|implement(s|ed|ing|ations?)?|add(ed|s|ing)?|support(s|ed|ing)?))/i'
 
   - label: '📝 Proposal'
     matcher:
