@@ -1,32 +1,40 @@
 version: v1
+# Title regex concept:
+# - First alternative matches explicit prefixes (like "feat:", "fix:", "docs:", with optional scope/!).
+# - Second alternative matches free-text keywords only in the part before the first ":".
+#   This prevents free-text matching when a typed prefix is already present.
 labels:
   - label: '📒 Documentation'
     matcher:
-      title: '/(docs|doc:|\[doc\]|README|typos|comment|documentation)/i'
+      # Title matching strategy:
+      # 1) Prefer conventional prefixes first (e.g. "docs:" or "docs(scope):").
+      # 2) Otherwise use free-text keywords, but only before any ":" appears in the title.
+      title: '/^(docs(\([^)]+\))?!?:|[^:]*(docs?|readme|typos?|comments?|documentation))/i'
 
   - label: '☢️ Bug'
     matcher:
-      title: '/(fix|bug)/i'
+      # Same strategy for all title regexes below: prefix-first, then colon-safe free-text.
+      title: '/^(fix(\([^)]+\))?!?:|[^:]*(bugs?|bugfix(es)?|hotfix|fix(ed|es)?))/i'
 
   - label: '🧹 Updates'
     matcher:
-      title: '/(improve|improvements|missing|update|refactor|deprecated|remove|unused|test)/i'
+      title: '/^((chore|refactor|perf|test|build|ci|style)(\([^)]+\))?!?:|[^:]*(improv\w*|missing|updates?|refactor\w*|deprecated|remove(d|s)?|unused|tests?))/i'
 
   - label: '🤖 Dependencies'
     matcher:
-      title: '/(bump|dependencies)/i'
+      title: '/^((deps(\([^)]+\))?|chore\(deps[^)]*\))!?:|[^:]*(deps?|dependencies|bump|upgrades?))/i'
       files:
         - 'go.sum'
         - '**/go.sum'
 
   - label: '✏️ Feature'
     matcher:
-      title: '/(feature|feat|create|implement|add|support)/i'
+      title: '/^(feat(\([^)]+\))?!?:|[^:]*(features?|create(d|s)?|implement\w*|add(ed|s|ing)?|support\w*))/i'
 
   - label: '📝 Proposal'
     matcher:
-      title: '/(proposal|idea|request|suggest)/i'
+      title: '/^(proposal(\([^)]+\))?!?:|[^:]*(proposals?|ideas?|requests?|suggest(ion|ions|ed)?))/i'
 
   - label: '🤔 Question'
     matcher:
-      title: '/(question|how)/i'
+      title: '/^(question(\([^)]+\))?!?:|[^:]*(questions?|how|why|what|\?))/i'
