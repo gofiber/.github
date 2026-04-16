@@ -4,18 +4,20 @@ name: weekly-release
 # process. Callers live in each target repo (cli, utils, template, storage,
 # contrib) and differ only in the cron line + repo-type input.
 #
+# Auth: uses the caller's automatic `GITHUB_TOKEN`. No external App or PAT is
+# required — the caller just needs the right `permissions:` block (see
+# `permissions:` further down; callers must grant at least the same set).
+#
 # Flow (single-module repos — multi-module waves are added in a later iteration):
-#   1. Mint a GitHub App installation token (scopes: contents:write,
-#      issues:write, pull-requests:read). The legacy `.github/workflows/
+#   1. Locate the newest draft release. The legacy `.github/workflows/
 #      release-drafter.yml` workflow in each repo keeps a fresh draft up-to-date
 #      on every push to main; this workflow consumes that draft.
-#   2. Locate the newest draft release.
-#   3. Compare its tag's major segment against the latest published release AND
+#   2. Compare its tag's major segment against the latest published release AND
 #      scan the draft body for a non-empty "Breaking Changes" section to detect
 #      a major bump.
-#   4. If major and `skip-major: true` (default): upsert a tracking issue,
+#   3. If major and `skip-major: true` (default): upsert a tracking issue,
 #      do NOT publish, exit 0. Maintainer reviews + publishes manually.
-#   5. Otherwise: call the `clean-release-notes` composite action with
+#   4. Otherwise: call the `clean-release-notes` composite action with
 #      `publish: true` so the body rewrite and `draft: false` happen in a
 #      single atomic PATCH — this avoids the race where the legacy release-
 #      drafter workflow (still active) could clobber the cleaned body.
@@ -77,13 +79,10 @@ on:
         required: false
         type: number
         default: 10
-    secrets:
-      app-id:
-        description: GitHub App ID for gofiber-release-bot.
-        required: true
-      app-private-key:
-        description: GitHub App private key for gofiber-release-bot (PEM).
-        required: true
+    # No secrets block: the reusable workflow uses the caller's
+    # `secrets.GITHUB_TOKEN` via the GH_TOKEN env var. The caller MUST grant
+    # contents:write + issues:write + pull-requests:read via its own
+    # `permissions:` block, otherwise GitHub clamps the token down.
 
 permissions:
   contents: write
@@ -96,20 +95,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Generate App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v1
-        with:
-          app-id: ${{ secrets.app-id }}
-          private-key: ${{ secrets.app-private-key }}
-          # owner + repositories default to the caller repo — correct for the
-          # publish + issue upsert. If the action later needs cross-repo
-          # access (e.g. to the central repo), add `repositories:` here.
-
       - name: Locate latest draft release
         id: draft
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
@@ -142,7 +131,7 @@ jobs:
         id: bump
         if: steps.draft.outputs.no-draft == 'false'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
         shell: bash
@@ -188,7 +177,7 @@ jobs:
           steps.bump.outputs.is_major == 'true' &&
           inputs.skip-major
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
           PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
@@ -231,7 +220,7 @@ jobs:
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major != 'true'
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
         shell: bash
@@ -266,7 +255,7 @@ jobs:
           dry-run: ${{ inputs.dry-run }}
           publish: ${{ inputs.dry-run && 'false' || 'true' }}
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Summary
         if: always() && steps.draft.outputs.no-draft == 'false'
