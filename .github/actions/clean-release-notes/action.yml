@@ -1,0 +1,149 @@
+name: Clean release notes
+description: >
+  Fetch the body of an existing GitHub release draft, run it through the
+  GoFiber release-notes-cleanup tool (strip bullet emoji / conventional-commit
+  prefixes, drop bot contributors, optionally dedupe PR references across
+  sections), and write the cleaned body back. When `publish: true` the
+  PATCH request also flips `draft` to `false` in the same atomic call.
+
+  The caller must supply a token (typically via `env.GH_TOKEN`) that has
+  `contents: write` on the target repository.
+
+inputs:
+  release-id:
+    description: Numeric ID of the GitHub release to clean.
+    required: true
+  repo:
+    description: Target repository in "owner/name" form.
+    required: false
+    default: ${{ github.repository }}
+  bots:
+    description: >
+      Extra bot logins to strip from the contributor footer, comma-separated.
+      Merged with the tool's built-in defaults (dependabot[bot],
+      renovate[bot], github-actions[bot]).
+    required: false
+    default: ""
+  dedupe:
+    description: Drop duplicate PR references that span multiple sections.
+    required: false
+    default: "true"
+  dry-run:
+    description: >
+      When "true", compute the cleaned body but do NOT PATCH the release.
+      The diff is printed to the job log for inspection.
+    required: false
+    default: "false"
+  publish:
+    description: >
+      When "true", the PATCH that writes the cleaned body also sets
+      `draft: false` in the same API call — an atomic clean-and-publish.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The Go source lives next to this action.yml, so ${{ github.action_path }}
+    # already points at everything we need. No separate checkout required.
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        # The go.mod shipped with the action pins the required Go version.
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache: false
+
+    - name: Build cleanup binary
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        go build -trimpath -o "$RUNNER_TEMP/release-notes-cleanup" ./
+
+    - name: Fetch current release body
+      id: fetch
+      shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+        RELEASE_ID: ${{ inputs.release-id }}
+      run: |
+        set -euo pipefail
+        # --jq extracts the already-decoded string, so we can write it verbatim.
+        gh api "/repos/${REPO}/releases/${RELEASE_ID}" --jq '.body // ""' > "$RUNNER_TEMP/original.md"
+        echo "original-bytes=$(wc -c < "$RUNNER_TEMP/original.md" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+    - name: Run cleanup
+      id: clean
+      shell: bash
+      env:
+        BOTS: ${{ inputs.bots }}
+        DEDUPE: ${{ inputs.dedupe }}
+      run: |
+        set -euo pipefail
+        # Build --dedupe flag explicitly so "false" actually turns it off;
+        # go's flag package treats bare "--dedupe" as true, "--dedupe=false"
+        # as false.
+        dedupe_flag="--dedupe=true"
+        if [ "${DEDUPE}" = "false" ]; then
+          dedupe_flag="--dedupe=false"
+        fi
+        bots_args=()
+        if [ -n "${BOTS}" ]; then
+          bots_args=(--bots "${BOTS}")
+        fi
+        "$RUNNER_TEMP/release-notes-cleanup" "${bots_args[@]}" "$dedupe_flag" \
+          < "$RUNNER_TEMP/original.md" \
+          > "$RUNNER_TEMP/cleaned.md" \
+          2> "$RUNNER_TEMP/cleanup.log" || {
+            echo "cleanup tool failed; stderr log follows:" >&2
+            cat "$RUNNER_TEMP/cleanup.log" >&2
+            exit 1
+          }
+        echo "cleaned-bytes=$(wc -c < "$RUNNER_TEMP/cleaned.md" | tr -d ' ')" >> "$GITHUB_OUTPUT"
+
+    - name: Show cleanup notes and diff
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -s "$RUNNER_TEMP/cleanup.log" ]; then
+          echo "### Cleanup notes" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat "$RUNNER_TEMP/cleanup.log" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Cleanup notes:"
+          cat "$RUNNER_TEMP/cleanup.log"
+        else
+          echo "Cleanup produced no notes."
+        fi
+        echo
+        echo "Diff (original vs cleaned):"
+        diff -u "$RUNNER_TEMP/original.md" "$RUNNER_TEMP/cleaned.md" || true
+
+    - name: Patch release (and optionally publish)
+      if: ${{ inputs.dry-run != 'true' }}
+      shell: bash
+      env:
+        REPO: ${{ inputs.repo }}
+        RELEASE_ID: ${{ inputs.release-id }}
+        PUBLISH: ${{ inputs.publish }}
+      run: |
+        set -euo pipefail
+        args=(--method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
+              --raw-field "body=@${RUNNER_TEMP}/cleaned.md")
+        if [ "${PUBLISH}" = "true" ]; then
+          # -F sends typed JSON fields (booleans stay booleans).
+          args+=(-F draft=false)
+        fi
+        gh api "${args[@]}" > /dev/null
+        if [ "${PUBLISH}" = "true" ]; then
+          echo "Release ${RELEASE_ID} in ${REPO}: body patched + published."
+        else
+          echo "Release ${RELEASE_ID} in ${REPO}: body patched (still draft)."
+        fi
+
+    - name: Dry-run notice
+      if: ${{ inputs.dry-run == 'true' }}
+      shell: bash
+      run: |
+        echo "dry-run: no API write was performed." >> "$GITHUB_STEP_SUMMARY"
+        echo "dry-run: no API write was performed."
