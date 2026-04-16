@@ -289,10 +289,12 @@ func TestGoldenFiles(t *testing.T) {
 
 // resolveOpts maps a fixture base name to the cleanup options it should be
 // applied with. Keeping this mapping in code (rather than per-file config)
-// makes the intent explicit and reviewable.
+// makes the intent explicit and reviewable. The bot allowlist starts from
+// the central DefaultBots so the fixtures exercise the same defaults the
+// CLI ships with.
 func resolveOpts(name string) Options {
 	opts := Options{
-		Bots:   []string{"dependabot[bot]", "renovate[bot]", "github-actions[bot]"},
+		Bots:   append([]string(nil), DefaultBots...),
 		Dedupe: true,
 	}
 	switch name {

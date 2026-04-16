@@ -1,0 +1,299 @@
+name: weekly-release
+
+# Reusable, centrally hosted orchestrator for GoFiber's weekly auto-release
+# process. Callers live in each target repo (cli, utils, template, storage,
+# contrib) and differ only in the cron line + repo-type input.
+#
+# Flow (single-module repos — multi-module waves are added in a later iteration):
+#   1. Mint a GitHub App installation token (scopes: contents:write,
+#      issues:write, pull-requests:read). The legacy `.github/workflows/
+#      release-drafter.yml` workflow in each repo keeps a fresh draft up-to-date
+#      on every push to main; this workflow consumes that draft.
+#   2. Locate the newest draft release.
+#   3. Compare its tag's major segment against the latest published release AND
+#      scan the draft body for a non-empty "Breaking Changes" section to detect
+#      a major bump.
+#   4. If major and `skip-major: true` (default): upsert a tracking issue,
+#      do NOT publish, exit 0. Maintainer reviews + publishes manually.
+#   5. Otherwise: call the `clean-release-notes` composite action with
+#      `publish: true` so the body rewrite and `draft: false` happen in a
+#      single atomic PATCH — this avoids the race where the legacy release-
+#      drafter workflow (still active) could clobber the cleaned body.
+#
+# Reminder: GitHub Actions does not allow expressions in `uses:`; the
+# composite action reference below is hardcoded to `@main`. To pin the
+# central action to a SHA, edit this file and bump the ref here.
+
+on:
+  workflow_call:
+    inputs:
+      repo-type:
+        description: 'single | multi — only `single` is implemented in this iteration.'
+        required: true
+        type: string
+      release-plan-path:
+        description: Path to the per-repo release plan manifest (unused for `single`).
+        required: false
+        type: string
+        default: .github/release-plan.yml
+      config-repository:
+        description: Repository that hosts this reusable workflow and the composite action.
+        required: false
+        type: string
+        default: gofiber/.github
+      config-ref:
+        description: Informational — intended git ref of the central repo. GitHub Actions does not allow expressions in `uses:`, so the composite action call below stays pinned to `@main`.
+        required: false
+        type: string
+        default: main
+      dry-run:
+        description: When true, compute the cleaned body but do not PATCH the release.
+        required: false
+        type: boolean
+        default: false
+      skip-major:
+        description: When true, major-version bumps are left as drafts and a tracking issue is upserted.
+        required: false
+        type: boolean
+        default: true
+      bot-logins:
+        description: >-
+          Extra bot logins to strip from the contributor footer, comma-separated.
+          Merged with the cleanup tool's built-in defaults
+          (dependabot[bot], renovate[bot], github-actions[bot],
+          copilot[bot], copilot-swe-agent[bot],
+          claude[bot], anthropic-claude[bot],
+          gemini[bot], gemini-code-assist[bot]).
+        required: false
+        type: string
+        default: ''
+      dedupe:
+        description: Drop duplicate PR references across sections.
+        required: false
+        type: boolean
+        default: true
+      publish-delay-minutes:
+        description: Delay between module publishes in a multi-module wave (unused for `single`).
+        required: false
+        type: number
+        default: 10
+    secrets:
+      app-id:
+        description: GitHub App ID for gofiber-release-bot.
+        required: true
+      app-private-key:
+        description: GitHub App private key for gofiber-release-bot (PEM).
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: read
+  issues: write
+
+jobs:
+  single-release:
+    if: inputs.repo-type == 'single'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Generate App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.app-id }}
+          private-key: ${{ secrets.app-private-key }}
+          # owner + repositories default to the caller repo — correct for the
+          # publish + issue upsert. If the action later needs cross-repo
+          # access (e.g. to the central repo), add `repositories:` here.
+
+      - name: Locate latest draft release
+        id: draft
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Fetch all releases and pick the most recently created draft.
+          # There should normally be exactly one draft, but we guard against
+          # zero (nothing to do) and log a warning when we see more than one.
+          releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
+          drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
+          count=$(printf '%s' "$drafts" | jq 'length')
+          if [ "$count" -eq 0 ]; then
+            echo "no-draft=true" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ No draft release found — nothing to publish this week." >> "$GITHUB_STEP_SUMMARY"
+            echo "no draft release found"
+            exit 0
+          fi
+          if [ "$count" -gt 1 ]; then
+            echo "::warning::Found $count draft releases; using the newest. Investigate the others."
+          fi
+          printf '%s' "$drafts" | jq '.[0]' > "$RUNNER_TEMP/draft.json"
+          jq -r '.body // ""' "$RUNNER_TEMP/draft.json" > "$RUNNER_TEMP/draft_body.md"
+          {
+            echo "no-draft=false"
+            echo "id=$(jq -r '.id' "$RUNNER_TEMP/draft.json")"
+            echo "tag_name=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")"
+            echo "name=$(jq -r '.name // ""' "$RUNNER_TEMP/draft.json")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Determine previous tag and bump kind
+        id: bump
+        if: steps.draft.outputs.no-draft == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
+          echo "prev_tag=${prev}" >> "$GITHUB_OUTPUT"
+
+          is_major=false
+          reason=""
+          if [ -n "$prev" ]; then
+            prev_major=$(printf '%s' "$prev"    | sed -E 's/^v?([0-9]+).*/\1/')
+            next_major=$(printf '%s' "$NEXT_TAG" | sed -E 's/^v?([0-9]+).*/\1/')
+            if [ "$next_major" -gt "$prev_major" ] 2>/dev/null; then
+              is_major=true
+              reason="major segment bumped: ${prev} → ${NEXT_TAG}"
+            fi
+          fi
+
+          # Secondary signal: a non-empty "Breaking Changes" section in the
+          # body forces the major gate even if the tag bumper missed it.
+          if [ "$is_major" = "false" ]; then
+            awk '
+              /^## .*[Bb]reaking/ { in_section = 1; next }
+              /^## /              { in_section = 0 }
+              in_section && /^- / { print; exit }
+            ' "$RUNNER_TEMP/draft_body.md" > "$RUNNER_TEMP/breaking.txt"
+            if [ -s "$RUNNER_TEMP/breaking.txt" ]; then
+              is_major=true
+              reason="draft contains a non-empty Breaking Changes section"
+            fi
+          fi
+
+          echo "is_major=${is_major}" >> "$GITHUB_OUTPUT"
+          echo "reason=${reason}"    >> "$GITHUB_OUTPUT"
+          echo "prev: ${prev:-<none>} | next: ${NEXT_TAG} | is_major=${is_major} (${reason:-no breaking signal})" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Major gate — upsert tracking issue and skip
+        id: major-gate
+        if: >-
+          steps.draft.outputs.no-draft == 'false' &&
+          steps.bump.outputs.is_major == 'true' &&
+          inputs.skip-major
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
+          PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
+          DRAFT_ID: ${{ steps.draft.outputs.id }}
+          REASON:   ${{ steps.bump.outputs.reason }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          title="Major release pending: ${NEXT_TAG}"
+          draft_url="${GITHUB_SERVER_URL}/${GH_REPO}/releases/tag/${NEXT_TAG}"
+          run_url="${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}"
+          existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
+          body=$(cat <<EOF
+          release-drafter has prepared \`${NEXT_TAG}\` (previous: \`${PREV_TAG:-<none>}\`).
+          The weekly auto-release job skipped it because **${REASON}** and \`skip-major\` is on.
+
+          Please review, edit the draft as needed, and publish manually.
+
+          - Draft: ${draft_url}
+          - Workflow run: ${run_url}
+          EOF
+          )
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "Weekly run $(date -u +%FT%TZ) still sees the pending major release. ${run_url}"
+            echo "commented on #${existing}"
+          else
+            gh issue create --title "$title" --body "$body" --label "release-automation"
+            echo "created tracking issue for ${NEXT_TAG}"
+          fi
+          {
+            echo "🚧 Major bump **skipped** — maintainer review required."
+            echo ""
+            echo "- Reason: ${REASON}"
+            echo "- Draft: ${draft_url}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check for open pending-major tracking issue
+        id: pending
+        if: >-
+          steps.draft.outputs.no-draft == 'false' &&
+          steps.bump.outputs.is_major != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Even for a non-major draft, skip if the current draft tag is the
+          # subject of an open pending-major issue (the maintainer is working
+          # on it — we would clobber their edits).
+          title="Major release pending: ${NEXT_TAG}"
+          existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
+          if [ -n "$existing" ]; then
+            echo "pending=true"  >> "$GITHUB_OUTPUT"
+            echo "issue=$existing" >> "$GITHUB_OUTPUT"
+            echo "⏸️ Skipping publish — tracking issue #${existing} is still open for ${NEXT_TAG}." \
+              >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Clean and publish release
+        if: >-
+          steps.draft.outputs.no-draft == 'false' &&
+          steps.bump.outputs.is_major != 'true' &&
+          steps.pending.outputs.pending != 'true'
+        # GitHub Actions does not allow expressions in `uses:`. To pin this
+        # to a specific version, change `@main` to a tag or SHA.
+        uses: gofiber/.github/.github/actions/clean-release-notes@main
+        with:
+          release-id: ${{ steps.draft.outputs.id }}
+          bots: ${{ inputs.bot-logins }}
+          dedupe: ${{ inputs.dedupe }}
+          dry-run: ${{ inputs.dry-run }}
+          publish: ${{ inputs.dry-run && 'false' || 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Summary
+        if: always() && steps.draft.outputs.no-draft == 'false'
+        env:
+          NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
+          DRY_RUN:  ${{ inputs.dry-run }}
+          PENDING:  ${{ steps.pending.outputs.pending }}
+          IS_MAJOR: ${{ steps.bump.outputs.is_major }}
+        shell: bash
+        run: |
+          set -eu
+          case "${IS_MAJOR}/${PENDING}/${DRY_RUN}" in
+            true/*/*)          echo "outcome: major-skip (${NEXT_TAG})" ;;
+            */true/*)          echo "outcome: pending-major-open — skipped (${NEXT_TAG})" ;;
+            */*/true)          echo "outcome: dry-run (${NEXT_TAG}) — no API write" ;;
+            *)                 echo "outcome: published (${NEXT_TAG})" ;;
+          esac
+
+  multi-release:
+    # Placeholder wired up so callers with `repo-type: multi` don't silently
+    # produce a no-op workflow. Fails explicitly until the multi-module
+    # implementation lands in a later iteration.
+    if: inputs.repo-type == 'multi'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Not yet implemented
+        shell: bash
+        run: |
+          echo "::error::repo-type=multi is not yet implemented in weekly-release.yml. Ship single-module first."
+          exit 1

@@ -23,14 +23,9 @@ import (
 	"github.com/gofiber/dotgithub/actions/clean-release-notes/cleanup"
 )
 
-// defaultBots is the organization-wide allowlist merged with the caller's
-// --bots flag. Keep it narrow; aggressive defaults risk dropping a real
-// person whose name collides with a common bot pattern.
-var defaultBots = []string{
-	"dependabot[bot]",
-	"renovate[bot]",
-	"github-actions[bot]",
-}
+// defaultBots delegates to the central list maintained in the cleanup
+// package. Edit cleanup.DefaultBots to change the allowlist.
+var defaultBots = cleanup.DefaultBots
 
 func main() {
 	exitCode := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:])

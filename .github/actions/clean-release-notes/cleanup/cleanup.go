@@ -27,6 +27,28 @@ import (
 	"strings"
 )
 
+// DefaultBots is the organization-wide allowlist of bot logins whose
+// appearances in the "Thank you @..." contributor footer should be stripped.
+// The CLI and the composite action both consume this slice, so adding an
+// entry here propagates to every caller.
+//
+// Keep the list narrow: aggressive defaults risk dropping a real person whose
+// name collides with a common bot pattern. All entries are matched
+// case-insensitively.
+var DefaultBots = []string{
+	// GitHub-native bots.
+	"dependabot[bot]",
+	"renovate[bot]",
+	"github-actions[bot]",
+	// AI coding assistants (PR-opening integrations).
+	"copilot[bot]",
+	"copilot-swe-agent[bot]",
+	"claude[bot]",
+	"anthropic-claude[bot]",
+	"gemini[bot]",
+	"gemini-code-assist[bot]",
+}
+
 // Options controls Apply.
 type Options struct {
 	// Bots is the list of login names (with or without "[bot]" suffix) that

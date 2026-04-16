@@ -20,8 +20,10 @@ inputs:
   bots:
     description: >
       Extra bot logins to strip from the contributor footer, comma-separated.
-      Merged with the tool's built-in defaults (dependabot[bot],
-      renovate[bot], github-actions[bot]).
+      Merged with the tool's built-in defaults: dependabot[bot],
+      renovate[bot], github-actions[bot], copilot[bot],
+      copilot-swe-agent[bot], claude[bot], anthropic-claude[bot],
+      gemini[bot], gemini-code-assist[bot].
     required: false
     default: ""
   dedupe:
