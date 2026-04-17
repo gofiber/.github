@@ -1,42 +1,41 @@
 name: weekly-release
 
-# Reusable, centrally hosted orchestrator for GoFiber's weekly auto-release
-# process. Callers live in each target repo (cli, utils, template, storage,
-# contrib) and differ only in the cron line + repo-type input.
+# Reusable, centrally hosted orchestrator for GoFiber's weekly auto-release.
 #
-# Auth: uses the caller's automatic `GITHUB_TOKEN`. No external App or PAT is
-# required — the caller just needs the right `permissions:` block.
+# Auth: uses the caller's automatic GITHUB_TOKEN. Callers must grant
+# permissions: contents:write, pull-requests:read, issues:write.
 #
-# Flow (single-module repos — multi-module waves added in a later iteration):
-#   1. Locate draft releases. The legacy release-drafter workflow in each repo
-#      keeps fresh drafts on every push to main; this workflow consumes them.
-#   2. Optionally filter by `draft-tags` (supports full tags like "v2.0.3" AND
-#      package names like "websocket" — matched as substrings in the tag).
-#   3. Detect major bumps (tag comparison + Breaking Changes section scan).
-#   4. If major + skip-major: upsert a tracking issue, exit 0.
-#   5. Otherwise: clean release body + publish in one atomic PATCH.
+# Single-module (cli, utils, schema, multi-labeler):
+#   Locates the newest draft, major-gate, cleanup, atomic publish.
+#
+# Multi-module (contrib, storage, template):
+#   Reads a `release-plan.yml` manifest from the caller repo that defines
+#   ordered "waves" of modules. Waves run sequentially (wave 2 waits for
+#   wave 1). Modules within a wave run sequentially with a configurable
+#   delay between publishes. Each module is matched to its draft release
+#   via `tag-prefix`. Dependencies (e.g. socketio→websocket in contrib,
+#   engines→core in template) are solved by putting the dependency in an
+#   earlier wave.
 
 on:
   workflow_call:
     inputs:
       repo-type:
-        description: 'single | multi — only `single` is implemented in this iteration.'
+        description: 'single | multi'
         required: true
         type: string
       draft-tags:
         description: >-
           Comma-separated filter for draft releases. Supports full tags
           (e.g. "v2.0.3") AND package names (e.g. "websocket", "redis").
-          Matched as substrings against each draft's tag_name — so
-          "websocket" matches "v3/websocket/v1.2.0" and "redis" matches
-          "redis/v3.4.3". Leave empty to process ALL pending drafts.
+          Matched as substrings against each draft's tag_name. Empty = all.
         required: false
         type: string
         default: ''
       release-plan-path:
         description: >-
-          Path to the per-repo release plan manifest. Only read when
-          repo-type=multi. Single-module callers do not need a manifest.
+          Path to the per-repo release plan manifest (waves + modules).
+          Only read when repo-type=multi.
         required: false
         type: string
         default: .github/release-plan.yml
@@ -46,24 +45,22 @@ on:
         type: string
         default: gofiber/.github
       config-ref:
-        description: Informational git ref of the central repo (cannot be used in `uses:`).
+        description: Informational git ref of the central repo.
         required: false
         type: string
         default: main
       dry-run:
-        description: When true, compute the cleaned body but do not PATCH the release.
+        description: When true, compute the cleaned body but do not publish.
         required: false
         type: boolean
         default: false
       skip-major:
-        description: When true, major-version bumps are left as drafts and a tracking issue is upserted.
+        description: When true, major-version bumps are left as drafts with a tracking issue.
         required: false
         type: boolean
         default: true
       bot-logins:
-        description: >-
-          Extra bot logins to strip from the contributor footer, comma-separated.
-          Merged with the cleanup tool's built-in defaults.
+        description: Extra bot keywords for the contributor filter, comma-separated.
         required: false
         type: string
         default: ''
@@ -73,10 +70,10 @@ on:
         type: boolean
         default: true
       publish-delay-minutes:
-        description: Delay between module publishes in a multi-module wave (unused for `single`).
+        description: Delay (minutes) between module publishes in a multi-module wave.
         required: false
         type: number
-        default: 10
+        default: 2
 
 permissions:
   contents: write
@@ -86,6 +83,7 @@ permissions:
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
+  # ── Single-module release ─────────────────────────────────────────────────
   single-release:
     if: inputs.repo-type == 'single'
     runs-on: ubuntu-latest
@@ -100,8 +98,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # Fetch all releases and extract drafts, newest first.
           releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
           drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
           count=$(printf '%s' "$drafts" | jq 'length')
@@ -109,11 +105,9 @@ jobs:
           if [ "$count" -eq 0 ]; then
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ No draft release found — nothing to publish this week." >> "$GITHUB_STEP_SUMMARY"
-            echo "no draft release found"
             exit 0
           fi
 
-          # Always list all available drafts in the summary.
           {
             echo "## Available draft releases"
             echo ""
@@ -124,14 +118,11 @@ jobs:
             if [ -z "${DRAFT_TAGS}" ]; then
               echo "> Processing **all** drafts (no filter set)."
             else
-              echo "> Filter active: \`${DRAFT_TAGS}\` (substring match on tag name)."
+              echo "> Filter active: \`${DRAFT_TAGS}\` (substring match)."
             fi
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # If a filter was provided, match as substrings against tag_name.
-          # This supports both full tags ("v2.0.3") and package names
-          # ("websocket" matches "v3/websocket/v1.2.0").
           if [ -n "${DRAFT_TAGS}" ]; then
             filters=$(printf '%s' "$DRAFT_TAGS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
             drafts=$(printf '%s' "$drafts" | jq --argjson f "$filters" \
@@ -140,29 +131,21 @@ jobs:
             if [ "$count" -eq 0 ]; then
               echo "no-draft=true" >> "$GITHUB_OUTPUT"
               echo "ℹ️ No draft matched filter: ${DRAFT_TAGS}" >> "$GITHUB_STEP_SUMMARY"
-              echo "no matching draft for: ${DRAFT_TAGS}"
               exit 0
             fi
-            echo "Filtered to $count draft(s) matching: ${DRAFT_TAGS}"
           fi
 
           if [ "$count" -gt 1 ]; then
-            echo "::warning::Found $count draft releases; using the newest. Investigate the others."
+            echo "::warning::Found $count draft releases; using the newest."
           fi
 
-          # For single-module: pick the first (newest) draft.
           printf '%s' "$drafts" | jq '.[0]' > "$RUNNER_TEMP/draft.json"
           jq -r '.body // ""' "$RUNNER_TEMP/draft.json" > "$RUNNER_TEMP/draft_body.md"
 
-          # Skip drafts that contain no actual PR/issue references.
-          # release-drafter sometimes creates placeholder drafts before any
-          # PRs are merged — publishing those is pointless. We look for
-          # "#123" references or /pull/ and /issues/ links.
           if ! grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+' "$RUNNER_TEMP/draft_body.md"; then
             tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ Draft \`${tag}\` has no PR entries — skipped." >> "$GITHUB_STEP_SUMMARY"
-            echo "draft ${tag} has no PR entries, skipping"
             exit 0
           fi
 
@@ -198,11 +181,8 @@ jobs:
           fi
 
           if [ "$is_major" = "false" ]; then
-            awk '
-              /^## .*[Bb]reaking/ { in_section = 1; next }
-              /^## /              { in_section = 0 }
-              in_section && /^- / { print; exit }
-            ' "$RUNNER_TEMP/draft_body.md" > "$RUNNER_TEMP/breaking.txt"
+            awk '/^## .*[Bb]reaking/{f=1;next}/^## /{f=0}f&&/^- /{print;exit}' \
+              "$RUNNER_TEMP/draft_body.md" > "$RUNNER_TEMP/breaking.txt"
             if [ -s "$RUNNER_TEMP/breaking.txt" ]; then
               is_major=true
               reason="draft contains a non-empty Breaking Changes section"
@@ -232,27 +212,19 @@ jobs:
           draft_url="${GITHUB_SERVER_URL}/${GH_REPO}/releases/tag/${NEXT_TAG}"
           run_url="${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}"
           existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
-          body=$(cat <<EOF
-          release-drafter has prepared \`${NEXT_TAG}\` (previous: \`${PREV_TAG:-<none>}\`).
+          body="release-drafter has prepared \`${NEXT_TAG}\` (previous: \`${PREV_TAG:-<none>}\`).
           The weekly auto-release job skipped it because **${REASON}** and \`skip-major\` is on.
 
           Please review, edit the draft as needed, and publish manually.
 
           - Draft: ${draft_url}
-          - Workflow run: ${run_url}
-          EOF
-          )
+          - Workflow run: ${run_url}"
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Weekly run $(date -u +%FT%TZ) still sees the pending major release. ${run_url}"
           else
             gh issue create --title "$title" --body "$body" --label "release-automation"
           fi
-          {
-            echo "🚧 Major bump **skipped** — maintainer review required."
-            echo ""
-            echo "- Reason: ${REASON}"
-            echo "- Draft: ${draft_url}"
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "🚧 Major bump **skipped**: ${REASON}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for open pending-major tracking issue
         id: pending
@@ -269,10 +241,8 @@ jobs:
           title="Major release pending: ${NEXT_TAG}"
           existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
           if [ -n "$existing" ]; then
-            echo "pending=true"  >> "$GITHUB_OUTPUT"
-            echo "issue=$existing" >> "$GITHUB_OUTPUT"
-            echo "⏸️ Skipping — tracking issue #${existing} is still open for ${NEXT_TAG}." \
-              >> "$GITHUB_STEP_SUMMARY"
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            echo "⏸️ Skipping — tracking issue #${existing} is still open for ${NEXT_TAG}." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "pending=false" >> "$GITHUB_OUTPUT"
           fi
@@ -303,19 +273,305 @@ jobs:
         run: |
           set -eu
           case "${IS_MAJOR}/${PENDING}/${DRY_RUN}" in
-            true/*/*)          echo "outcome: major-skip (${NEXT_TAG})" ;;
-            */true/*)          echo "outcome: pending-major-open — skipped (${NEXT_TAG})" ;;
-            */*/true)          echo "outcome: dry-run (${NEXT_TAG}) — no API write" ;;
-            *)                 echo "outcome: published (${NEXT_TAG})" ;;
+            true/*/*)   echo "outcome: major-skip (${NEXT_TAG})" ;;
+            */true/*)   echo "outcome: pending-major-open — skipped (${NEXT_TAG})" ;;
+            */*/true)   echo "outcome: dry-run (${NEXT_TAG}) — no API write" ;;
+            *)          echo "outcome: published (${NEXT_TAG})" ;;
           esac
 
-  # ── Placeholder: multi-module wave orchestration ──────────────────────────
+  # ── Multi-module wave release ─────────────────────────────────────────────
+  #
+  # Reads release-plan.yml for explicit dependency waves, then auto-discovers
+  # any remaining drafts that weren't listed and releases them in a final
+  # "auto" wave. This means new packages are picked up automatically — the
+  # manifest only needs entries for modules with ordering constraints.
   multi-release:
     if: inputs.repo-type == 'multi'
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
-      - name: Not yet implemented
+      - name: Checkout caller repo (for release-plan.yml)
+        uses: actions/checkout@v5
+        with:
+          sparse-checkout: ${{ inputs.release-plan-path }}
+
+      - name: Checkout central repo (for cleanup tool)
+        uses: actions/checkout@v5
+        with:
+          repository: gofiber/.github
+          path: .central
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: .central/.github/actions/clean-release-notes/go.mod
+          cache: false
+
+      - name: Build cleanup tool
         shell: bash
         run: |
-          echo "::error::repo-type=multi is not yet implemented in weekly-release.yml."
-          exit 1
+          cd .central/.github/actions/clean-release-notes
+          go build -trimpath -o "$RUNNER_TEMP/release-notes-cleanup" ./
+
+      - name: Process waves + auto-discover remaining
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          DRAFT_TAGS: ${{ inputs.draft-tags }}
+          DRY_RUN: ${{ inputs.dry-run }}
+          SKIP_MAJOR: ${{ inputs.skip-major }}
+          BOT_LOGINS: ${{ inputs.bot-logins }}
+          DEDUPE: ${{ inputs.dedupe }}
+          DELAY_MINUTES: ${{ inputs.publish-delay-minutes }}
+          PLAN_PATH: ${{ inputs.release-plan-path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # ── Read manifest ──────────────────────────────────────────
+          if [ ! -f "$PLAN_PATH" ]; then
+            echo "::error::Release plan not found: $PLAN_PATH"
+            exit 1
+          fi
+
+          if ! command -v yq &>/dev/null; then
+            wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            chmod +x /usr/local/bin/yq
+          fi
+
+          wave_count=$(yq '.waves | length // 0' "$PLAN_PATH")
+
+          # ── Fetch all releases once ────────────────────────────────
+          releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
+          all_drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)]')
+
+          {
+            echo "## Available draft releases"
+            echo ""
+            echo "| Tag | Name | Created |"
+            echo "|-----|------|---------|"
+            printf '%s' "$all_drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "—") | \(.created_at[:10]) |"'
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Apply user filter if set
+          if [ -n "$DRAFT_TAGS" ]; then
+            filters=$(printf '%s' "$DRAFT_TAGS" | jq -R \
+              'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+            all_drafts=$(printf '%s' "$all_drafts" | jq --argjson f "$filters" \
+              '[.[] | select(.tag_name as $t | $f | any(. as $p | $t | contains($p)))]')
+            echo "> Filter: \`$DRAFT_TAGS\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # ── Track processed draft tags ─────────────────────────────
+          > "$RUNNER_TEMP/processed_tags.txt"
+
+          # ── Helpers ────────────────────────────────────────────────
+          find_draft() {
+            local prefix="$1"
+            if [ -z "$prefix" ] || [ "$prefix" = "null" ]; then
+              printf '%s' "$all_drafts" | jq \
+                '[.[] | select(.tag_name | test("^v[0-9]"))] | sort_by(.created_at) | reverse | .[0] // empty'
+            else
+              printf '%s' "$all_drafts" | jq --arg p "$prefix" \
+                '[.[] | select(.tag_name | startswith($p))] | sort_by(.created_at) | reverse | .[0] // empty'
+            fi
+          }
+
+          find_prev() {
+            local prefix="$1"
+            if [ -z "$prefix" ] || [ "$prefix" = "null" ]; then
+              printf '%s' "$releases" | jq -r \
+                '[.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v[0-9]")))] | sort_by(.created_at) | reverse | .[0].tag_name // ""'
+            else
+              printf '%s' "$releases" | jq -r --arg p "$prefix" \
+                '[.[] | select(.draft == false and .prerelease == false and (.tag_name | startswith($p)))] | sort_by(.created_at) | reverse | .[0].tag_name // ""'
+            fi
+          }
+
+          find_prev_for_tag() {
+            local tag="$1"
+            # Extract the prefix (everything before the last /vN.N.N segment)
+            local prefix=$(printf '%s' "$tag" | sed -E 's|(.*/)v[0-9].*|\1|')
+            if [ "$prefix" = "$tag" ]; then prefix=""; fi
+            find_prev "$prefix"
+          }
+
+          # ── process_module: shared logic for one draft release ─────
+          published=0
+          skipped=0
+          failed=0
+          is_first_module=true
+
+          process_module() {
+            local name="$1"
+            local draft="$2"
+
+            local draft_id draft_tag draft_body
+            draft_id=$(printf '%s' "$draft" | jq -r '.id')
+            draft_tag=$(printf '%s' "$draft" | jq -r '.tag_name')
+            draft_body=$(printf '%s' "$draft" | jq -r '.body // ""')
+
+            # Record as processed
+            echo "$draft_tag" >> "$RUNNER_TEMP/processed_tags.txt"
+
+            # Delay (skip before the very first module)
+            if [ "$is_first_module" = "true" ]; then
+              is_first_module=false
+            elif [ "$DRY_RUN" != "true" ] && [ "$DELAY_MINUTES" -gt 0 ]; then
+              echo "⏳ Waiting ${DELAY_MINUTES}m before \`$name\`..."
+              sleep "$((DELAY_MINUTES * 60))"
+            fi
+
+            # Skip empty drafts
+            if ! printf '%s' "$draft_body" | grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+'; then
+              echo "- ⏭️ \`$name\` (\`$draft_tag\`): no PR entries" >> "$GITHUB_STEP_SUMMARY"
+              ((skipped++)) || true
+              return
+            fi
+
+            # Major detection
+            local prev_tag is_major=false
+            prev_tag=$(find_prev_for_tag "$draft_tag")
+            if [ -n "$prev_tag" ]; then
+              local prev_v next_v
+              prev_v=$(printf '%s' "$prev_tag" | sed -E 's/.*v([0-9]+)\..*/\1/')
+              next_v=$(printf '%s' "$draft_tag" | sed -E 's/.*v([0-9]+)\..*/\1/')
+              if [ "$next_v" -gt "$prev_v" ] 2>/dev/null; then
+                is_major=true
+              fi
+            fi
+            if [ "$is_major" = "false" ]; then
+              if printf '%s' "$draft_body" | awk '/^## .*[Bb]reaking/{f=1;next}/^## /{f=0}f&&/^- /{print;exit}' | grep -q .; then
+                is_major=true
+              fi
+            fi
+
+            if [ "$is_major" = "true" ] && [ "$SKIP_MAJOR" = "true" ]; then
+              echo "- 🚧 \`$name\` (\`$draft_tag\`): **major — skipped**" >> "$GITHUB_STEP_SUMMARY"
+              local title="Major release pending: ${draft_tag}"
+              local existing
+              existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
+              if [ -z "$existing" ]; then
+                gh issue create --title "$title" \
+                  --body "Weekly auto-release detected a major bump for \`$draft_tag\`. Please review and publish manually." \
+                  --label "release-automation" || true
+              fi
+              ((skipped++)) || true
+              return
+            fi
+
+            # Pending-major check
+            local title="Major release pending: ${draft_tag}"
+            local existing
+            existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
+            if [ -n "$existing" ]; then
+              echo "- ⏸️ \`$name\` (\`$draft_tag\`): pending-major #${existing}" >> "$GITHUB_STEP_SUMMARY"
+              ((skipped++)) || true
+              return
+            fi
+
+            # Cleanup
+            printf '%s' "$draft_body" > "$RUNNER_TEMP/original.md"
+            local dedupe_flag="--dedupe=true"
+            [ "$DEDUPE" = "false" ] && dedupe_flag="--dedupe=false"
+            local bots_args=()
+            [ -n "$BOT_LOGINS" ] && bots_args=(--bots "$BOT_LOGINS")
+
+            "$RUNNER_TEMP/release-notes-cleanup" "${bots_args[@]}" "$dedupe_flag" \
+              < "$RUNNER_TEMP/original.md" \
+              > "$RUNNER_TEMP/cleaned.md" \
+              2> "$RUNNER_TEMP/cleanup.log" || true
+
+            # Publish or dry-run
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run**" >> "$GITHUB_STEP_SUMMARY"
+              {
+                echo "<details><summary>Diff for $name</summary>"
+                echo ""
+                echo '```diff'
+                diff -u "$RUNNER_TEMP/original.md" "$RUNNER_TEMP/cleaned.md" || true
+                echo '```'
+                echo "</details>"
+              } >> "$GITHUB_STEP_SUMMARY"
+              ((published++)) || true
+            else
+              local payload
+              payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
+              if printf '%s' "$payload" | gh api --method PATCH "/repos/${GH_REPO}/releases/${draft_id}" --input - > /dev/null 2>&1; then
+                echo "- ✅ \`$name\` (\`$draft_tag\`): **published**" >> "$GITHUB_STEP_SUMMARY"
+                ((published++)) || true
+              else
+                echo "- ❌ \`$name\` (\`$draft_tag\`): **FAILED**" >> "$GITHUB_STEP_SUMMARY"
+                ((failed++)) || true
+              fi
+            fi
+          }
+
+          # ── Process waves from manifest ───────────────────────────
+          for wi in $(seq 0 $((wave_count - 1))); do
+            wave_name=$(yq ".waves[$wi].name" "$PLAN_PATH")
+            auto_discover=$(yq ".waves[$wi].auto-discover // false" "$PLAN_PATH")
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ "$auto_discover" = "true" ]; then
+              # ── Auto-discover: release all drafts not yet processed ──
+              if [ -s "$RUNNER_TEMP/processed_tags.txt" ]; then
+                processed=$(jq -R . "$RUNNER_TEMP/processed_tags.txt" | jq -s .)
+                remaining=$(printf '%s' "$all_drafts" | jq --argjson done "$processed" \
+                  '[.[] | select(.tag_name as $t | $done | index($t) | not)] | sort_by(.tag_name)')
+              else
+                remaining=$(printf '%s' "$all_drafts" | jq 'sort_by(.tag_name)')
+              fi
+
+              remaining_count=$(printf '%s' "$remaining" | jq 'length')
+              echo "### Wave $((wi+1)): $wave_name (auto-discover: $remaining_count drafts)" >> "$GITHUB_STEP_SUMMARY"
+
+              if [ "$remaining_count" -eq 0 ]; then
+                echo "- No remaining drafts to process." >> "$GITHUB_STEP_SUMMARY"
+                continue
+              fi
+
+              for ri in $(seq 0 $((remaining_count - 1))); do
+                draft=$(printf '%s' "$remaining" | jq ".[$ri]")
+                draft_tag=$(printf '%s' "$draft" | jq -r '.tag_name')
+                # Derive a display name from the tag (strip version suffix)
+                name=$(printf '%s' "$draft_tag" | sed -E 's|/v[0-9].*||')
+                process_module "$name" "$draft"
+              done
+            else
+              # ── Explicit wave: process listed modules ────────────────
+              module_count=$(yq ".waves[$wi].modules | length" "$PLAN_PATH")
+              echo "### Wave $((wi+1)): $wave_name" >> "$GITHUB_STEP_SUMMARY"
+
+              for mi in $(seq 0 $((module_count - 1))); do
+                name=$(yq ".waves[$wi].modules[$mi].name" "$PLAN_PATH")
+                tag_prefix=$(yq ".waves[$wi].modules[$mi].tag-prefix // \"\"" "$PLAN_PATH")
+
+                draft=$(find_draft "$tag_prefix")
+                if [ -z "$draft" ]; then
+                  echo "- ⏭️ \`$name\`: no draft (prefix: \`$tag_prefix\`)" >> "$GITHUB_STEP_SUMMARY"
+                  ((skipped++)) || true
+                  continue
+                fi
+
+                process_module "$name" "$draft"
+              done
+            fi
+          done
+
+          # ── Final summary ──────────────────────────────────────────
+          {
+            echo ""
+            echo "### Results"
+            echo "- Published: $published"
+            echo "- Skipped: $skipped"
+            echo "- Failed: $failed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$failed" -gt 0 ]; then
+            echo "::error::$failed module(s) failed to publish."
+            exit 1
+          fi
