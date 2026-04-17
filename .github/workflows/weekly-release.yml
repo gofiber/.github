@@ -7,26 +7,14 @@ name: weekly-release
 # Auth: uses the caller's automatic `GITHUB_TOKEN`. No external App or PAT is
 # required — the caller just needs the right `permissions:` block.
 #
-# Three modes:
-#
-#   auto (default, used by schedule + dispatch without mode override):
-#     Locates all pending draft releases, detects major bumps, cleans the
-#     body, and publishes in a single atomic PATCH. This is the hands-off
-#     weekly cadence.
-#
-#   select (manual dispatch with mode=select):
-#     Lists all draft releases and creates (or updates) a GitHub Issue with
-#     checkboxes — one per draft. Does NOT publish anything. The maintainer
-#     checks the desired drafts and adds the label `approve-release` to the
-#     issue, which triggers mode=process.
-#
-#   process (triggered by issues:labeled with approve-release):
-#     Reads the selection issue, extracts the checked tags, cleans + publishes
-#     only those, then closes the issue. Ideal for multi-module repos where
-#     you want to cherry-pick which packages to release.
-#
-# Reminder: GitHub Actions does not allow expressions in `uses:`; the
-# composite action reference below is hardcoded to `@main`.
+# Flow (single-module repos — multi-module waves added in a later iteration):
+#   1. Locate draft releases. The legacy release-drafter workflow in each repo
+#      keeps fresh drafts on every push to main; this workflow consumes them.
+#   2. Optionally filter by `draft-tags` (supports full tags like "v2.0.3" AND
+#      package names like "websocket" — matched as substrings in the tag).
+#   3. Detect major bumps (tag comparison + Breaking Changes section scan).
+#   4. If major + skip-major: upsert a tracking issue, exit 0.
+#   5. Otherwise: clean release body + publish in one atomic PATCH.
 
 on:
   workflow_call:
@@ -35,21 +23,16 @@ on:
         description: 'single | multi — only `single` is implemented in this iteration.'
         required: true
         type: string
-      mode:
+      draft-tags:
         description: >-
-          auto: publish all non-major drafts (scheduled default).
-          select: create a GitHub Issue with draft checkboxes for manual selection.
-          process: read a selection issue and publish the checked drafts.
+          Comma-separated filter for draft releases. Supports full tags
+          (e.g. "v2.0.3") AND package names (e.g. "websocket", "redis").
+          Matched as substrings against each draft's tag_name — so
+          "websocket" matches "v3/websocket/v1.2.0" and "redis" matches
+          "redis/v3.4.3". Leave empty to process ALL pending drafts.
         required: false
         type: string
-        default: auto
-      issue-number:
-        description: >-
-          Issue number to read when mode=process (passed automatically by
-          the caller's issues:labeled trigger). Ignored for other modes.
-        required: false
-        type: number
-        default: 0
+        default: ''
       release-plan-path:
         description: >-
           Path to the per-repo release plan manifest. Only read when
@@ -58,7 +41,7 @@ on:
         type: string
         default: .github/release-plan.yml
       config-repository:
-        description: Repository that hosts this reusable workflow and the composite action.
+        description: Repository hosting this reusable workflow and the composite action.
         required: false
         type: string
         default: gofiber/.github
@@ -94,14 +77,6 @@ on:
         required: false
         type: number
         default: 10
-      draft-tags:
-        description: >-
-          Comma-separated list of draft release tags to process. When empty,
-          ALL pending drafts are eligible. Overridden by mode=process (which
-          reads tags from the selection issue instead).
-        required: false
-        type: string
-        default: ''
 
 permissions:
   contents: write
@@ -111,109 +86,8 @@ permissions:
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
-  # ── Step 0: Resolve which drafts to process ───────────────────────────────
-  #
-  # This job runs for every mode and produces:
-  #   - should-release: 'true' if downstream jobs should publish, 'false' if
-  #     this run was just to create the selection issue (mode=select).
-  #   - draft-tags: comma-separated tags to pass as a filter, or '' for all.
-  #   - issue-to-close: issue number to close after a successful publish
-  #     (mode=process only), or '0'.
-  resolve-tags:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    outputs:
-      should-release: ${{ steps.resolve.outputs.should-release }}
-      draft-tags: ${{ steps.resolve.outputs.draft-tags }}
-      issue-to-close: ${{ steps.resolve.outputs.issue-to-close }}
-    steps:
-      - name: Resolve mode and tags
-        id: resolve
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          MODE: ${{ inputs.mode }}
-          ISSUE_NUMBER: ${{ inputs.issue-number }}
-          CALLER_DRAFT_TAGS: ${{ inputs.draft-tags }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          case "${MODE}" in
-            # ── select: list drafts and create/update a selection issue ──
-            select)
-              releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
-              drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
-              count=$(printf '%s' "$drafts" | jq 'length')
-              if [ "$count" -eq 0 ]; then
-                echo "No draft releases found — nothing to select." >> "$GITHUB_STEP_SUMMARY"
-                echo "should-release=false" >> "$GITHUB_OUTPUT"
-                echo "draft-tags=" >> "$GITHUB_OUTPUT"
-                echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              {
-                echo "## Weekly Release — Select drafts to publish"
-                echo ""
-                printf '%s' "$drafts" | jq -r '.[] | "- [ ] `\(.tag_name)` — \(.name // "untitled") (\(.created_at[:10]))"'
-                echo ""
-                echo "---"
-                echo "✅ Check the drafts you want to publish, then add the label \`approve-release\` to this issue."
-              } > "$RUNNER_TEMP/issue_body.md"
-
-              existing=$(gh issue list --label "weekly-release-selection" --state open --json number --jq '.[0].number // ""')
-              if [ -n "$existing" ]; then
-                gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue_body.md"
-                echo "Updated selection issue #${existing}" >> "$GITHUB_STEP_SUMMARY"
-              else
-                url=$(gh issue create \
-                  --title "Weekly Release — Select drafts to publish" \
-                  --body-file "$RUNNER_TEMP/issue_body.md" \
-                  --label "weekly-release-selection")
-                echo "Created selection issue: ${url}" >> "$GITHUB_STEP_SUMMARY"
-              fi
-              echo "should-release=false" >> "$GITHUB_OUTPUT"
-              echo "draft-tags=" >> "$GITHUB_OUTPUT"
-              echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
-              ;;
-
-            # ── process: parse checked tags from a selection issue ──────
-            process)
-              if [ "${ISSUE_NUMBER}" = "0" ] || [ -z "${ISSUE_NUMBER}" ]; then
-                echo "::error::mode=process requires a valid issue-number."
-                exit 1
-              fi
-              issue_body=$(gh issue view "${ISSUE_NUMBER}" --json body --jq '.body')
-              # Extract checked items: lines matching "- [x] `tag`" → tag
-              tags=$(printf '%s' "$issue_body" | grep -oP '\- \[x\]\s*`\K[^`]+' | paste -sd, -)
-              if [ -z "$tags" ]; then
-                echo "::warning::No drafts checked in issue #${ISSUE_NUMBER}. Nothing to publish."
-                gh issue edit "${ISSUE_NUMBER}" --remove-label "approve-release" 2>/dev/null || true
-                echo "should-release=false" >> "$GITHUB_OUTPUT"
-                echo "draft-tags=" >> "$GITHUB_OUTPUT"
-                echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
-                exit 0
-              fi
-              echo "Selected from issue #${ISSUE_NUMBER}: ${tags}" >> "$GITHUB_STEP_SUMMARY"
-              echo "should-release=true" >> "$GITHUB_OUTPUT"
-              echo "draft-tags=${tags}" >> "$GITHUB_OUTPUT"
-              echo "issue-to-close=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
-              ;;
-
-            # ── auto: scheduled / direct dispatch — pass through ────────
-            auto|*)
-              echo "should-release=true" >> "$GITHUB_OUTPUT"
-              echo "draft-tags=${CALLER_DRAFT_TAGS}" >> "$GITHUB_OUTPUT"
-              echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
-
-  # ── Step 1: Single-module release pipeline ────────────────────────────────
   single-release:
-    needs: [resolve-tags]
-    if: >-
-      needs.resolve-tags.outputs.should-release == 'true' &&
-      inputs.repo-type == 'single'
+    if: inputs.repo-type == 'single'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -222,7 +96,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          DRAFT_TAGS: ${{ needs.resolve-tags.outputs.draft-tags }}
+          DRAFT_TAGS: ${{ inputs.draft-tags }}
         shell: bash
         run: |
           set -euo pipefail
@@ -250,19 +124,22 @@ jobs:
             if [ -z "${DRAFT_TAGS}" ]; then
               echo "> Processing **all** drafts (no filter set)."
             else
-              echo "> Filter active: only processing tags matching \`${DRAFT_TAGS}\`."
+              echo "> Filter active: \`${DRAFT_TAGS}\` (substring match on tag name)."
             fi
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # If specific tags were requested, filter to those.
+          # If a filter was provided, match as substrings against tag_name.
+          # This supports both full tags ("v2.0.3") and package names
+          # ("websocket" matches "v3/websocket/v1.2.0").
           if [ -n "${DRAFT_TAGS}" ]; then
-            tags_json=$(printf '%s' "$DRAFT_TAGS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
-            drafts=$(printf '%s' "$drafts" | jq --argjson tags "$tags_json" '[.[] | select(.tag_name as $t | $tags | index($t) != null)]')
+            filters=$(printf '%s' "$DRAFT_TAGS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+            drafts=$(printf '%s' "$drafts" | jq --argjson f "$filters" \
+              '[.[] | select(.tag_name as $t | $f | any(. as $p | $t | contains($p)))]')
             count=$(printf '%s' "$drafts" | jq 'length')
             if [ "$count" -eq 0 ]; then
               echo "no-draft=true" >> "$GITHUB_OUTPUT"
-              echo "ℹ️ No draft release found matching: ${DRAFT_TAGS}" >> "$GITHUB_STEP_SUMMARY"
+              echo "ℹ️ No draft matched filter: ${DRAFT_TAGS}" >> "$GITHUB_STEP_SUMMARY"
               echo "no matching draft for: ${DRAFT_TAGS}"
               exit 0
             fi
@@ -307,8 +184,6 @@ jobs:
             fi
           fi
 
-          # Secondary signal: a non-empty "Breaking Changes" section in the
-          # body forces the major gate even if the tag bumper missed it.
           if [ "$is_major" = "false" ]; then
             awk '
               /^## .*[Bb]reaking/ { in_section = 1; next }
@@ -327,7 +202,6 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
 
       - name: Major gate — upsert tracking issue and skip
-        id: major-gate
         if: >-
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major == 'true' &&
@@ -337,7 +211,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           NEXT_TAG: ${{ steps.draft.outputs.tag_name }}
           PREV_TAG: ${{ steps.bump.outputs.prev_tag }}
-          DRAFT_ID: ${{ steps.draft.outputs.id }}
           REASON:   ${{ steps.bump.outputs.reason }}
         shell: bash
         run: |
@@ -358,10 +231,8 @@ jobs:
           )
           if [ -n "$existing" ]; then
             gh issue comment "$existing" --body "Weekly run $(date -u +%FT%TZ) still sees the pending major release. ${run_url}"
-            echo "commented on #${existing}"
           else
             gh issue create --title "$title" --body "$body" --label "release-automation"
-            echo "created tracking issue for ${NEXT_TAG}"
           fi
           {
             echo "🚧 Major bump **skipped** — maintainer review required."
@@ -387,7 +258,7 @@ jobs:
           if [ -n "$existing" ]; then
             echo "pending=true"  >> "$GITHUB_OUTPUT"
             echo "issue=$existing" >> "$GITHUB_OUTPUT"
-            echo "⏸️ Skipping publish — tracking issue #${existing} is still open for ${NEXT_TAG}." \
+            echo "⏸️ Skipping — tracking issue #${existing} is still open for ${NEXT_TAG}." \
               >> "$GITHUB_STEP_SUMMARY"
           else
             echo "pending=false" >> "$GITHUB_OUTPUT"
@@ -425,35 +296,9 @@ jobs:
             *)                 echo "outcome: published (${NEXT_TAG})" ;;
           esac
 
-  # ── Step 2: Close selection issue after successful publish ────────────────
-  close-selection:
-    needs: [resolve-tags, single-release]
-    if: >-
-      always() &&
-      needs.resolve-tags.outputs.issue-to-close != '0' &&
-      needs.single-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Close selection issue
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-          ISSUE: ${{ needs.resolve-tags.outputs.issue-to-close }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          run_url="${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}"
-          gh issue close "${ISSUE}" \
-            --comment "✅ Published selected drafts. [Workflow run](${run_url})."
-          gh issue edit "${ISSUE}" --remove-label "approve-release" 2>/dev/null || true
-
   # ── Placeholder: multi-module wave orchestration ──────────────────────────
   multi-release:
-    needs: [resolve-tags]
-    if: >-
-      needs.resolve-tags.outputs.should-release == 'true' &&
-      inputs.repo-type == 'multi'
+    if: inputs.repo-type == 'multi'
     runs-on: ubuntu-latest
     steps:
       - name: Not yet implemented
