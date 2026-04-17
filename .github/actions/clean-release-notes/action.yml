@@ -130,13 +130,15 @@ runs:
         PUBLISH: ${{ inputs.publish }}
       run: |
         set -euo pipefail
-        args=(--method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" \
-              --raw-field "body=@${RUNNER_TEMP}/cleaned.md")
+        # Build the JSON payload with jq so markdown content (newlines,
+        # backticks, special chars) is correctly escaped. --rawfile reads
+        # the cleaned body verbatim into a jq string variable.
         if [ "${PUBLISH}" = "true" ]; then
-          # -F sends typed JSON fields (booleans stay booleans).
-          args+=(-F draft=false)
+          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
+        else
+          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body}')
         fi
-        gh api "${args[@]}" > /dev/null
+        printf '%s' "$payload" | gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" --input - > /dev/null
         if [ "${PUBLISH}" = "true" ]; then
           echo "Release ${RELEASE_ID} in ${REPO}: body patched + published."
         else
