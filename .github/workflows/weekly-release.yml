@@ -5,26 +5,28 @@ name: weekly-release
 # contrib) and differ only in the cron line + repo-type input.
 #
 # Auth: uses the caller's automatic `GITHUB_TOKEN`. No external App or PAT is
-# required — the caller just needs the right `permissions:` block (see
-# `permissions:` further down; callers must grant at least the same set).
+# required — the caller just needs the right `permissions:` block.
 #
-# Flow (single-module repos — multi-module waves are added in a later iteration):
-#   1. Locate the newest draft release. The legacy `.github/workflows/
-#      release-drafter.yml` workflow in each repo keeps a fresh draft up-to-date
-#      on every push to main; this workflow consumes that draft.
-#   2. Compare its tag's major segment against the latest published release AND
-#      scan the draft body for a non-empty "Breaking Changes" section to detect
-#      a major bump.
-#   3. If major and `skip-major: true` (default): upsert a tracking issue,
-#      do NOT publish, exit 0. Maintainer reviews + publishes manually.
-#   4. Otherwise: call the `clean-release-notes` composite action with
-#      `publish: true` so the body rewrite and `draft: false` happen in a
-#      single atomic PATCH — this avoids the race where the legacy release-
-#      drafter workflow (still active) could clobber the cleaned body.
+# Three modes:
+#
+#   auto (default, used by schedule + dispatch without mode override):
+#     Locates all pending draft releases, detects major bumps, cleans the
+#     body, and publishes in a single atomic PATCH. This is the hands-off
+#     weekly cadence.
+#
+#   select (manual dispatch with mode=select):
+#     Lists all draft releases and creates (or updates) a GitHub Issue with
+#     checkboxes — one per draft. Does NOT publish anything. The maintainer
+#     checks the desired drafts and adds the label `approve-release` to the
+#     issue, which triggers mode=process.
+#
+#   process (triggered by issues:labeled with approve-release):
+#     Reads the selection issue, extracts the checked tags, cleans + publishes
+#     only those, then closes the issue. Ideal for multi-module repos where
+#     you want to cherry-pick which packages to release.
 #
 # Reminder: GitHub Actions does not allow expressions in `uses:`; the
-# composite action reference below is hardcoded to `@main`. To pin the
-# central action to a SHA, edit this file and bump the ref here.
+# composite action reference below is hardcoded to `@main`.
 
 on:
   workflow_call:
@@ -33,8 +35,25 @@ on:
         description: 'single | multi — only `single` is implemented in this iteration.'
         required: true
         type: string
+      mode:
+        description: >-
+          auto: publish all non-major drafts (scheduled default).
+          select: create a GitHub Issue with draft checkboxes for manual selection.
+          process: read a selection issue and publish the checked drafts.
+        required: false
+        type: string
+        default: auto
+      issue-number:
+        description: >-
+          Issue number to read when mode=process (passed automatically by
+          the caller's issues:labeled trigger). Ignored for other modes.
+        required: false
+        type: number
+        default: 0
       release-plan-path:
-        description: Path to the per-repo release plan manifest (unused for `single`).
+        description: >-
+          Path to the per-repo release plan manifest. Only read when
+          repo-type=multi. Single-module callers do not need a manifest.
         required: false
         type: string
         default: .github/release-plan.yml
@@ -44,7 +63,7 @@ on:
         type: string
         default: gofiber/.github
       config-ref:
-        description: Informational — intended git ref of the central repo. GitHub Actions does not allow expressions in `uses:`, so the composite action call below stays pinned to `@main`.
+        description: Informational git ref of the central repo (cannot be used in `uses:`).
         required: false
         type: string
         default: main
@@ -61,11 +80,7 @@ on:
       bot-logins:
         description: >-
           Extra bot logins to strip from the contributor footer, comma-separated.
-          Merged with the cleanup tool's built-in defaults
-          (dependabot[bot], renovate[bot], github-actions[bot],
-          copilot[bot], copilot-swe-agent[bot],
-          claude[bot], anthropic-claude[bot],
-          gemini[bot], gemini-code-assist[bot]).
+          Merged with the cleanup tool's built-in defaults.
         required: false
         type: string
         default: ''
@@ -79,45 +94,186 @@ on:
         required: false
         type: number
         default: 10
-    # No secrets block: the reusable workflow uses the caller's
-    # `secrets.GITHUB_TOKEN` via the GH_TOKEN env var. The caller MUST grant
-    # contents:write + issues:write + pull-requests:read via its own
-    # `permissions:` block, otherwise GitHub clamps the token down.
+      draft-tags:
+        description: >-
+          Comma-separated list of draft release tags to process. When empty,
+          ALL pending drafts are eligible. Overridden by mode=process (which
+          reads tags from the selection issue instead).
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: write
   pull-requests: read
   issues: write
 
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
+
+  # ── Step 0: Resolve which drafts to process ───────────────────────────────
+  #
+  # This job runs for every mode and produces:
+  #   - should-release: 'true' if downstream jobs should publish, 'false' if
+  #     this run was just to create the selection issue (mode=select).
+  #   - draft-tags: comma-separated tags to pass as a filter, or '' for all.
+  #   - issue-to-close: issue number to close after a successful publish
+  #     (mode=process only), or '0'.
+  resolve-tags:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should-release: ${{ steps.resolve.outputs.should-release }}
+      draft-tags: ${{ steps.resolve.outputs.draft-tags }}
+      issue-to-close: ${{ steps.resolve.outputs.issue-to-close }}
+    steps:
+      - name: Resolve mode and tags
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          MODE: ${{ inputs.mode }}
+          ISSUE_NUMBER: ${{ inputs.issue-number }}
+          CALLER_DRAFT_TAGS: ${{ inputs.draft-tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${MODE}" in
+            # ── select: list drafts and create/update a selection issue ──
+            select)
+              releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
+              drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
+              count=$(printf '%s' "$drafts" | jq 'length')
+              if [ "$count" -eq 0 ]; then
+                echo "No draft releases found — nothing to select." >> "$GITHUB_STEP_SUMMARY"
+                echo "should-release=false" >> "$GITHUB_OUTPUT"
+                echo "draft-tags=" >> "$GITHUB_OUTPUT"
+                echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              {
+                echo "## Weekly Release — Select drafts to publish"
+                echo ""
+                printf '%s' "$drafts" | jq -r '.[] | "- [ ] `\(.tag_name)` — \(.name // "untitled") (\(.created_at[:10]))"'
+                echo ""
+                echo "---"
+                echo "✅ Check the drafts you want to publish, then add the label \`approve-release\` to this issue."
+              } > "$RUNNER_TEMP/issue_body.md"
+
+              existing=$(gh issue list --label "weekly-release-selection" --state open --json number --jq '.[0].number // ""')
+              if [ -n "$existing" ]; then
+                gh issue edit "$existing" --body-file "$RUNNER_TEMP/issue_body.md"
+                echo "Updated selection issue #${existing}" >> "$GITHUB_STEP_SUMMARY"
+              else
+                url=$(gh issue create \
+                  --title "Weekly Release — Select drafts to publish" \
+                  --body-file "$RUNNER_TEMP/issue_body.md" \
+                  --label "weekly-release-selection")
+                echo "Created selection issue: ${url}" >> "$GITHUB_STEP_SUMMARY"
+              fi
+              echo "should-release=false" >> "$GITHUB_OUTPUT"
+              echo "draft-tags=" >> "$GITHUB_OUTPUT"
+              echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
+              ;;
+
+            # ── process: parse checked tags from a selection issue ──────
+            process)
+              if [ "${ISSUE_NUMBER}" = "0" ] || [ -z "${ISSUE_NUMBER}" ]; then
+                echo "::error::mode=process requires a valid issue-number."
+                exit 1
+              fi
+              issue_body=$(gh issue view "${ISSUE_NUMBER}" --json body --jq '.body')
+              # Extract checked items: lines matching "- [x] `tag`" → tag
+              tags=$(printf '%s' "$issue_body" | grep -oP '\- \[x\]\s*`\K[^`]+' | paste -sd, -)
+              if [ -z "$tags" ]; then
+                echo "::warning::No drafts checked in issue #${ISSUE_NUMBER}. Nothing to publish."
+                gh issue edit "${ISSUE_NUMBER}" --remove-label "approve-release" 2>/dev/null || true
+                echo "should-release=false" >> "$GITHUB_OUTPUT"
+                echo "draft-tags=" >> "$GITHUB_OUTPUT"
+                echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+              echo "Selected from issue #${ISSUE_NUMBER}: ${tags}" >> "$GITHUB_STEP_SUMMARY"
+              echo "should-release=true" >> "$GITHUB_OUTPUT"
+              echo "draft-tags=${tags}" >> "$GITHUB_OUTPUT"
+              echo "issue-to-close=${ISSUE_NUMBER}" >> "$GITHUB_OUTPUT"
+              ;;
+
+            # ── auto: scheduled / direct dispatch — pass through ────────
+            auto|*)
+              echo "should-release=true" >> "$GITHUB_OUTPUT"
+              echo "draft-tags=${CALLER_DRAFT_TAGS}" >> "$GITHUB_OUTPUT"
+              echo "issue-to-close=0" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+  # ── Step 1: Single-module release pipeline ────────────────────────────────
   single-release:
-    if: inputs.repo-type == 'single'
+    needs: [resolve-tags]
+    if: >-
+      needs.resolve-tags.outputs.should-release == 'true' &&
+      inputs.repo-type == 'single'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Locate latest draft release
+      - name: Locate draft release(s)
         id: draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          DRAFT_TAGS: ${{ needs.resolve-tags.outputs.draft-tags }}
         shell: bash
         run: |
           set -euo pipefail
-          # Fetch all releases and pick the most recently created draft.
-          # There should normally be exactly one draft, but we guard against
-          # zero (nothing to do) and log a warning when we see more than one.
+
+          # Fetch all releases and extract drafts, newest first.
           releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
           drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
           count=$(printf '%s' "$drafts" | jq 'length')
+
           if [ "$count" -eq 0 ]; then
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ No draft release found — nothing to publish this week." >> "$GITHUB_STEP_SUMMARY"
             echo "no draft release found"
             exit 0
           fi
+
+          # Always list all available drafts in the summary.
+          {
+            echo "## Available draft releases"
+            echo ""
+            echo "| Tag | Name | Created |"
+            echo "|-----|------|---------|"
+            printf '%s' "$drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "—") | \(.created_at[:10]) |"'
+            echo ""
+            if [ -z "${DRAFT_TAGS}" ]; then
+              echo "> Processing **all** drafts (no filter set)."
+            else
+              echo "> Filter active: only processing tags matching \`${DRAFT_TAGS}\`."
+            fi
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # If specific tags were requested, filter to those.
+          if [ -n "${DRAFT_TAGS}" ]; then
+            tags_json=$(printf '%s' "$DRAFT_TAGS" | jq -R 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+            drafts=$(printf '%s' "$drafts" | jq --argjson tags "$tags_json" '[.[] | select(.tag_name as $t | $tags | index($t) != null)]')
+            count=$(printf '%s' "$drafts" | jq 'length')
+            if [ "$count" -eq 0 ]; then
+              echo "no-draft=true" >> "$GITHUB_OUTPUT"
+              echo "ℹ️ No draft release found matching: ${DRAFT_TAGS}" >> "$GITHUB_STEP_SUMMARY"
+              echo "no matching draft for: ${DRAFT_TAGS}"
+              exit 0
+            fi
+            echo "Filtered to $count draft(s) matching: ${DRAFT_TAGS}"
+          fi
+
           if [ "$count" -gt 1 ]; then
             echo "::warning::Found $count draft releases; using the newest. Investigate the others."
           fi
+
+          # For single-module: pick the first (newest) draft.
           printf '%s' "$drafts" | jq '.[0]' > "$RUNNER_TEMP/draft.json"
           jq -r '.body // ""' "$RUNNER_TEMP/draft.json" > "$RUNNER_TEMP/draft_body.md"
           {
@@ -226,9 +382,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Even for a non-major draft, skip if the current draft tag is the
-          # subject of an open pending-major issue (the maintainer is working
-          # on it — we would clobber their edits).
           title="Major release pending: ${NEXT_TAG}"
           existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
           if [ -n "$existing" ]; then
@@ -245,8 +398,6 @@ jobs:
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major != 'true' &&
           steps.pending.outputs.pending != 'true'
-        # GitHub Actions does not allow expressions in `uses:`. To pin this
-        # to a specific version, change `@main` to a tag or SHA.
         uses: gofiber/.github/.github/actions/clean-release-notes@main
         with:
           release-id: ${{ steps.draft.outputs.id }}
@@ -274,15 +425,39 @@ jobs:
             *)                 echo "outcome: published (${NEXT_TAG})" ;;
           esac
 
+  # ── Step 2: Close selection issue after successful publish ────────────────
+  close-selection:
+    needs: [resolve-tags, single-release]
+    if: >-
+      always() &&
+      needs.resolve-tags.outputs.issue-to-close != '0' &&
+      needs.single-release.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close selection issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ needs.resolve-tags.outputs.issue-to-close }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_url="${GITHUB_SERVER_URL}/${GH_REPO}/actions/runs/${GITHUB_RUN_ID}"
+          gh issue close "${ISSUE}" \
+            --comment "✅ Published selected drafts. [Workflow run](${run_url})."
+          gh issue edit "${ISSUE}" --remove-label "approve-release" 2>/dev/null || true
+
+  # ── Placeholder: multi-module wave orchestration ──────────────────────────
   multi-release:
-    # Placeholder wired up so callers with `repo-type: multi` don't silently
-    # produce a no-op workflow. Fails explicitly until the multi-module
-    # implementation lands in a later iteration.
-    if: inputs.repo-type == 'multi'
+    needs: [resolve-tags]
+    if: >-
+      needs.resolve-tags.outputs.should-release == 'true' &&
+      inputs.repo-type == 'multi'
     runs-on: ubuntu-latest
     steps:
       - name: Not yet implemented
         shell: bash
         run: |
-          echo "::error::repo-type=multi is not yet implemented in weekly-release.yml. Ship single-module first."
+          echo "::error::repo-type=multi is not yet implemented in weekly-release.yml."
           exit 1
