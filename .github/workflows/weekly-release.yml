@@ -153,6 +153,19 @@ jobs:
           # For single-module: pick the first (newest) draft.
           printf '%s' "$drafts" | jq '.[0]' > "$RUNNER_TEMP/draft.json"
           jq -r '.body // ""' "$RUNNER_TEMP/draft.json" > "$RUNNER_TEMP/draft_body.md"
+
+          # Skip drafts that contain no actual PR/issue references.
+          # release-drafter sometimes creates placeholder drafts before any
+          # PRs are merged — publishing those is pointless. We look for
+          # "#123" references or /pull/ and /issues/ links.
+          if ! grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+' "$RUNNER_TEMP/draft_body.md"; then
+            tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
+            echo "no-draft=true" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ Draft \`${tag}\` has no PR entries — skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "draft ${tag} has no PR entries, skipping"
+            exit 0
+          fi
+
           {
             echo "no-draft=false"
             echo "id=$(jq -r '.id' "$RUNNER_TEMP/draft.json")"

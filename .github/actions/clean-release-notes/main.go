@@ -23,10 +23,6 @@ import (
 	"github.com/gofiber/dotgithub/actions/clean-release-notes/cleanup"
 )
 
-// defaultBots delegates to the central list maintained in the cleanup
-// package. Edit cleanup.DefaultBots to change the allowlist.
-var defaultBots = cleanup.DefaultBots
-
 func main() {
 	exitCode := run(os.Stdin, os.Stdout, os.Stderr, os.Args[1:])
 	os.Exit(exitCode)
@@ -45,7 +41,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 		verbose bool
 	)
 	fs.StringVar(&bots, "bots", "",
-		"extra bot logins to strip from the contributor footer, comma-separated; merged with defaults")
+		"extra bot keywords (comma-separated); a login is a bot if it contains [bot] or any keyword (case-insensitive substring)")
 	fs.BoolVar(&dedupe, "dedupe", true,
 		"drop bullets whose #PR reference already appears in a higher-priority section")
 	fs.BoolVar(&dryRun, "dry-run", false,
@@ -66,8 +62,8 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	original := string(raw)
 
 	opts := cleanup.Options{
-		Bots:   mergeBots(defaultBots, bots),
-		Dedupe: dedupe,
+		BotKeywords: parseCSV(bots),
+		Dedupe:      dedupe,
 	}
 	var warnings []string
 	opts.Warnings = &warnings
@@ -87,7 +83,7 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "--- dry-run summary ---")
 		fmt.Fprintf(stderr, "input  bytes: %d\n", len(original))
 		fmt.Fprintf(stderr, "output bytes: %d\n", len(cleaned))
-		fmt.Fprintf(stderr, "rules:        bots=%d dedupe=%t\n", len(opts.Bots), opts.Dedupe)
+		fmt.Fprintf(stderr, "rules:        extra-keywords=%d dedupe=%t\n", len(opts.BotKeywords), opts.Dedupe)
 	}
 
 	if verbose && len(warnings) == 0 {
@@ -97,17 +93,15 @@ func run(stdin io.Reader, stdout, stderr io.Writer, args []string) int {
 	return 0
 }
 
-// mergeBots combines the built-in allowlist with the caller's --bots flag,
-// trimming whitespace and skipping empty entries. Duplicates are preserved
-// because the downstream lookup is a set anyway.
-func mergeBots(defaults []string, extra string) []string {
-	merged := append([]string(nil), defaults...)
-	for _, s := range strings.Split(extra, ",") {
+// parseCSV splits a comma-separated string into trimmed, non-empty entries.
+func parseCSV(csv string) []string {
+	var result []string
+	for _, s := range strings.Split(csv, ",") {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
-		merged = append(merged, s)
+		result = append(result, s)
 	}
-	return merged
+	return result
 }

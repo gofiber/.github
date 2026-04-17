@@ -233,7 +233,6 @@ func TestApplyOrchestrates(t *testing.T) {
 	}, "\n")
 	var warns []string
 	out := Apply(in, Options{
-		Bots:     []string{"dependabot[bot]"},
 		Dedupe:   true,
 		Warnings: &warns,
 	})
@@ -288,20 +287,17 @@ func TestGoldenFiles(t *testing.T) {
 }
 
 // resolveOpts maps a fixture base name to the cleanup options it should be
-// applied with. Keeping this mapping in code (rather than per-file config)
-// makes the intent explicit and reviewable. The bot allowlist starts from
-// the central DefaultBots so the fixtures exercise the same defaults the
-// CLI ships with.
+// applied with. DefaultBotKeywords are merged automatically inside Apply(),
+// so we only pass extra keywords here when a fixture needs them.
 func resolveOpts(name string) Options {
 	opts := Options{
-		Bots:   append([]string(nil), DefaultBots...),
 		Dedupe: true,
 	}
 	switch name {
 	case "dedupe-off":
 		opts.Dedupe = false
 	case "custom-bot":
-		opts.Bots = append(opts.Bots, "gofiberbot")
+		opts.BotKeywords = []string{"gofiberbot"}
 	}
 	return opts
 }

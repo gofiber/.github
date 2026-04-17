@@ -27,34 +27,42 @@ import (
 	"strings"
 )
 
-// DefaultBots is the organization-wide allowlist of bot logins whose
-// appearances in the "Thank you @..." contributor footer should be stripped.
-// The CLI and the composite action both consume this slice, so adding an
-// entry here propagates to every caller.
-//
-// Keep the list narrow: aggressive defaults risk dropping a real person whose
-// name collides with a common bot pattern. All entries are matched
-// case-insensitively.
-var DefaultBots = []string{
-	// GitHub-native bots.
-	"dependabot[bot]",
-	"renovate[bot]",
-	"github-actions[bot]",
-	// AI coding assistants (PR-opening integrations).
-	"copilot[bot]",
-	"copilot-swe-agent[bot]",
-	"claude[bot]",
-	"anthropic-claude[bot]",
-	"gemini[bot]",
-	"gemini-code-assist[bot]",
+// DefaultBotKeywords is the organization-wide list of keywords used to
+// identify bot accounts in the contributor footer. A login is considered a
+// bot if it contains "[bot]" (any case) OR if it contains any of these
+// keywords as a case-insensitive substring. Adding an entry here propagates
+// to every caller (CLI + composite action).
+var DefaultBotKeywords = []string{
+	"[bot]",
+	"claude",
+	"copilot",
+	"codex",
+	"dependabot",
+	"github",
+	"gemini",
+	"renovate",
+}
+
+// isBot returns true if a login should be treated as a bot account.
+// A login is a bot if it contains any of the keywords as a case-insensitive
+// substring (e.g. "[bot]" matches "dependabot[bot]", "claude" matches
+// "anthropic-claude", etc.).
+func isBot(login string, keywords []string) bool {
+	lower := strings.ToLower(login)
+	for _, kw := range keywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			return true
+		}
+	}
+	return false
 }
 
 // Options controls Apply.
 type Options struct {
-	// Bots is the list of login names (with or without "[bot]" suffix) that
-	// should be stripped from the contributor footer. Comparison is
-	// case-insensitive.
-	Bots []string
+	// BotKeywords is a list of keywords used to identify bot accounts.
+	// A login is a bot if it contains "[bot]" OR any of these keywords
+	// (case-insensitive substring match). Merged with DefaultBotKeywords.
+	BotKeywords []string
 	// Dedupe, when true, removes duplicate PR references (#123) that appear in
 	// multiple sections. The occurrence in the highest-priority section wins.
 	Dedupe bool
@@ -276,13 +284,9 @@ func (b *Body) StripConvCommitPrefix() {
 // FilterBotContributors removes bot mentions from the "Thank you ..." line in
 // the epilogue. If the list is empty after filtering, the whole line is
 // dropped.
-func (b *Body) FilterBotContributors(bots []string, warn func(string)) {
+func (b *Body) FilterBotContributors(keywords []string, warn func(string)) {
 	if len(b.Epilogue) == 0 {
 		return
-	}
-	botSet := make(map[string]struct{}, len(bots))
-	for _, bot := range bots {
-		botSet[strings.ToLower(strings.TrimSpace(bot))] = struct{}{}
 	}
 
 	for i, ln := range b.Epilogue {
@@ -295,7 +299,7 @@ func (b *Body) FilterBotContributors(bots []string, warn func(string)) {
 		dropped := 0
 		for _, mn := range mentions {
 			login := mn[1]
-			if _, isBot := botSet[strings.ToLower(login)]; isBot {
+			if isBot(login, keywords) {
 				dropped++
 				continue
 			}
@@ -379,7 +383,9 @@ func Apply(body string, opts Options) string {
 		}
 	}
 
-	parsed.FilterBotContributors(opts.Bots, warn)
+	// Merge caller keywords with defaults for bot detection.
+	keywords := append(append([]string(nil), DefaultBotKeywords...), opts.BotKeywords...)
+	parsed.FilterBotContributors(keywords, warn)
 
 	if opts.Dedupe {
 		parsed.Dedupe(warn)
