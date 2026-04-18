@@ -72,8 +72,8 @@ on:
       publish-delay-minutes:
         description: Delay (minutes) between module publishes in a multi-module wave.
         required: false
-        type: number
-        default: 2
+        type: string
+        default: '2'
 
 permissions:
   contents: write
