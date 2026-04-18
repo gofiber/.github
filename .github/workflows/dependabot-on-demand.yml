@@ -4,9 +4,9 @@ name: dependabot-on-demand
 # dependency updates on-demand. Reads the caller repo's .github/dependabot.yml,
 # converts it to CLI job files, runs the updater, and creates PRs.
 #
-# Security: two-job split. Job 1 runs the CLI with read-only permissions
-# (ecosystems may execute arbitrary code in Docker). Job 2 has write
-# permissions and only processes the JSONL output to create PRs.
+# Each dependabot.yml entry runs in parallel (matrix strategy).
+# Within each entry, directories are processed sequentially:
+# run CLI → create PRs → next directory.
 
 on:
   workflow_call:
@@ -19,21 +19,98 @@ on:
         type: string
         default: ''
       branch:
-        description: Target branch.
+        description: >-
+          Target branch. Empty = repo default branch.
         required: false
         type: string
-        default: main
+        default: ''
 
 jobs:
-  # ── Job 1: Run Dependabot CLI (read-only) ────────────────────────────────
-  update:
+  # ── Job 1: Parse config and build matrix ──────────────────────────────
+  setup:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+      has_entries: ${{ steps.parse.outputs.has_entries }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install yq
+        run: |
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
+
+      - name: Build matrix from dependabot.yml
+        id: parse
+        env:
+          FILTER: ${{ inputs.ecosystems }}
+        run: |
+          set -euo pipefail
+          config=".github/dependabot.yml"
+
+          if [ ! -f "$config" ]; then
+            echo "No dependabot.yml found."
+            echo "has_entries=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          IFS=',' read -ra filter_list <<< "${FILTER:-}"
+          entries='[]'
+          count=$(yq '.updates | length' "$config")
+
+          for i in $(seq 0 $((count - 1))); do
+            ecosystem=$(yq ".updates[$i].package-ecosystem" "$config")
+
+            if [ -n "${FILTER:-}" ]; then
+              match=false
+              for f in "${filter_list[@]}"; do
+                [ "$(echo "$f" | xargs)" = "$ecosystem" ] && match=true
+              done
+              [ "$match" = "false" ] && continue
+            fi
+
+            # Use first directory pattern as label for the matrix job name
+            desc=$(yq ".updates[$i].directories[0] // .updates[$i].directory // \"/\"" "$config")
+
+            entries=$(echo "$entries" | jq -c \
+              --argjson idx "$i" \
+              --arg eco "$ecosystem" \
+              --arg desc "$desc" \
+              '. + [{"index": $idx, "ecosystem": $eco, "desc": $desc}]')
+          done
+
+          entry_count=$(echo "$entries" | jq 'length')
+          if [ "$entry_count" -eq 0 ]; then
+            echo "No matching entries."
+            echo "has_entries=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"include":[]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "Found ${entry_count} entries to process in parallel."
+            echo "has_entries=true" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":$(echo "$entries" | jq -c)}" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Job 2: Process each entry in parallel ─────────────────────────────
+  update:
+    name: ${{ matrix.ecosystem }} (${{ matrix.desc }})
+    needs: setup
+    if: needs.setup.outputs.has_entries == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      fail-fast: false
     steps:
       - uses: actions/checkout@v6
         with:
           path: repo
+          fetch-depth: 0
 
       - name: Download Dependabot CLI
         env:
@@ -45,27 +122,22 @@ jobs:
 
       - name: Install yq
         run: |
-          if ! command -v yq &>/dev/null; then
-            wget -qO /usr/local/bin/yq \
-              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
-            chmod +x /usr/local/bin/yq
-          fi
+          wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          chmod +x /usr/local/bin/yq
 
-      - name: Convert dependabot.yml to CLI job files
+      - name: Check for updates and create PRs
         env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BRANCH: ${{ inputs.branch }}
-          FILTER: ${{ inputs.ecosystems }}
+          BRANCH: ${{ inputs.branch || github.event.repository.default_branch }}
+          IDX: ${{ matrix.index }}
         run: |
           set -euo pipefail
 
           config="repo/.github/dependabot.yml"
-          > /tmp/jobs.txt
-
-          if [ ! -f "$config" ]; then
-            echo "No dependabot.yml found — skipping."
-            exit 0
-          fi
+          i=$IDX
 
           # Ecosystem name mapping (dependabot.yml → CLI)
           map_ecosystem() {
@@ -77,63 +149,50 @@ jobs:
             esac
           }
 
-          # Parse filter
-          IFS=',' read -ra filter_list <<< "${FILTER:-}"
+          ecosystem=$(yq ".updates[$i].package-ecosystem" "$config")
+          pm=$(map_ecosystem "$ecosystem")
 
-          update_count=$(yq '.updates | length' "$config")
-          job_idx=-1
+          # Configure git for PR creation
+          git -C repo config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+          git -C repo config user.name "dependabot[bot]"
 
-          for i in $(seq 0 $((update_count - 1))); do
-            ecosystem=$(yq ".updates[$i].package-ecosystem" "$config")
+          # Read labels (default: 🤖 Dependencies)
+          label_count=$(yq ".updates[$i].labels | length // 0" "$config")
+          labels="🤖 Dependencies"
+          if [ "$label_count" -gt 0 ]; then
+            labels=""
+            for l in $(seq 0 $((label_count - 1))); do
+              lbl=$(yq ".updates[$i].labels[$l]" "$config")
+              [ -n "$labels" ] && labels="${labels},"
+              labels="${labels}${lbl}"
+            done
+          fi
 
-            # Apply filter
-            if [ -n "${FILTER:-}" ]; then
-              match=false
-              for f in "${filter_list[@]}"; do
-                [ "$(echo "$f" | xargs)" = "$ecosystem" ] && match=true
+          # Resolve directories: support both "directory" (singular) and "directories" (plural with globs)
+          dirs=()
+          dir_count=$(yq ".updates[$i].directories | length // 0" "$config")
+          if [ "$dir_count" -gt 0 ]; then
+            for d in $(seq 0 $((dir_count - 1))); do
+              glob_pattern=$(yq ".updates[$i].directories[$d]" "$config")
+              rel_pattern="${glob_pattern#/}"
+              for match in repo/${rel_pattern}; do
+                [ -d "$match" ] || continue
+                dir_path="/${match#repo/}"
+                dirs+=("$dir_path")
               done
-              [ "$match" = "false" ] && continue
-            fi
+            done
+          else
+            dirs+=("$(yq ".updates[$i].directory // \"/\"" "$config")")
+          fi
 
-            pm=$(map_ecosystem "$ecosystem")
+          total_created=0
+          total_updated=0
 
-            # Read labels (default: 🤖 Dependencies)
-            label_count=$(yq ".updates[$i].labels | length // 0" "$config")
-            labels="🤖 Dependencies"
-            if [ "$label_count" -gt 0 ]; then
-              labels=""
-              for l in $(seq 0 $((label_count - 1))); do
-                lbl=$(yq ".updates[$i].labels[$l]" "$config")
-                [ -n "$labels" ] && labels="${labels},"
-                labels="${labels}${lbl}"
-              done
-            fi
+          # ── Process each directory: run CLI → create PRs ────────────────
+          for directory in "${dirs[@]}"; do
+            job_file="/tmp/job.yml"
 
-            # Resolve directories: support both "directory" (singular) and "directories" (plural with globs)
-            dirs=()
-            dir_count=$(yq ".updates[$i].directories | length // 0" "$config")
-            if [ "$dir_count" -gt 0 ]; then
-              # Expand glob patterns against the local checkout
-              for d in $(seq 0 $((dir_count - 1))); do
-                glob_pattern=$(yq ".updates[$i].directories[$d]" "$config")
-                # Strip leading / for filesystem glob, then re-add
-                rel_pattern="${glob_pattern#/}"
-                for match in repo/${rel_pattern}; do
-                  [ -d "$match" ] || continue
-                  dir_path="/${match#repo/}"
-                  dirs+=("$dir_path")
-                done
-              done
-            else
-              dirs+=("$(yq ".updates[$i].directory // \"/\"" "$config")")
-            fi
-
-            # Generate one job file per resolved directory
-            for directory in "${dirs[@]}"; do
-              job_idx=$((job_idx + 1))
-              job_file="/tmp/job-${job_idx}.yml"
-
-              cat > "$job_file" << JOBEOF
+            cat > "$job_file" << JOBEOF
           job:
             package-manager: ${pm}
             allowed-updates:
@@ -146,39 +205,39 @@ jobs:
               branch: ${BRANCH}
           JOBEOF
 
-              # Add commit-message options if present
-              cm_prefix=$(yq ".updates[$i].commit-message.prefix // \"\"" "$config")
-              cm_include=$(yq ".updates[$i].commit-message.include // \"\"" "$config")
-              if [ -n "$cm_prefix" ] && [ "$cm_prefix" != "null" ]; then
-                {
-                  echo "  commit-message-options:"
-                  echo "    prefix: \"${cm_prefix}\""
-                  [ -n "$cm_include" ] && [ "$cm_include" != "null" ] && echo "    include-scope: \"${cm_include}\""
-                } >> "$job_file"
-              fi
+            # Add commit-message options if present
+            cm_prefix=$(yq ".updates[$i].commit-message.prefix // \"\"" "$config")
+            cm_include=$(yq ".updates[$i].commit-message.include // \"\"" "$config")
+            if [ -n "$cm_prefix" ] && [ "$cm_prefix" != "null" ]; then
+              {
+                echo "  commit-message-options:"
+                echo "    prefix: \"${cm_prefix}\""
+                [ -n "$cm_include" ] && [ "$cm_include" != "null" ] && echo "    include-scope: \"${cm_include}\""
+              } >> "$job_file"
+            fi
 
-              # Add dependency groups if present (must be inside job: block)
-              group_count=$(yq ".updates[$i].groups | length // 0" "$config")
-              if [ "$group_count" -gt 0 ]; then
-                {
-                  echo "  dependency-groups:"
-                  for g in $(yq ".updates[$i].groups | keys | .[]" "$config"); do
-                    echo "    - name: ${g}"
-                    echo "      rules:"
-                    pattern_count=$(yq ".updates[$i].groups.${g}.patterns | length // 0" "$config")
-                    if [ "$pattern_count" -gt 0 ]; then
-                      echo "        patterns:"
-                      for p in $(seq 0 $((pattern_count - 1))); do
-                        pattern=$(yq ".updates[$i].groups.${g}.patterns[$p]" "$config")
-                        echo "          - \"${pattern}\""
-                      done
-                    fi
-                  done
-                } >> "$job_file"
-              fi
+            # Add dependency groups if present
+            group_count=$(yq ".updates[$i].groups | length // 0" "$config")
+            if [ "$group_count" -gt 0 ]; then
+              {
+                echo "  dependency-groups:"
+                for g in $(yq ".updates[$i].groups | keys | .[]" "$config"); do
+                  echo "    - name: ${g}"
+                  echo "      rules:"
+                  pattern_count=$(yq ".updates[$i].groups.${g}.patterns | length // 0" "$config")
+                  if [ "$pattern_count" -gt 0 ]; then
+                    echo "        patterns:"
+                    for p in $(seq 0 $((pattern_count - 1))); do
+                      pattern=$(yq ".updates[$i].groups.${g}.patterns[$p]" "$config")
+                      echo "          - \"${pattern}\""
+                    done
+                  fi
+                done
+              } >> "$job_file"
+            fi
 
-              # Add credentials section (after job: block)
-              cat >> "$job_file" << 'CREDEOF'
+            # Add credentials section (after job: block)
+            cat >> "$job_file" << 'CREDEOF'
           credentials:
             - type: git_source
               host: github.com
@@ -186,140 +245,92 @@ jobs:
               password: $GITHUB_TOKEN
           CREDEOF
 
-              echo "${pm}|${directory}|${job_file}|${labels}" >> /tmp/jobs.txt
-              echo "Generated job file for ${ecosystem} (${directory})"
-            done
-          done
-
-      - name: Run Dependabot CLI
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          > result.jsonl
-
-          if [ ! -s /tmp/jobs.txt ]; then
-            echo "No jobs to run."
-            exit 0
-          fi
-
-          > labels.map
-          while IFS='|' read -r pm dir job_file labels; do
-            echo "🔍 Checking ${pm} (${dir})..."
-            ./dependabot update -f "$job_file" --local repo --timeout 20m < /dev/null >> result.jsonl || true
-            echo "${pm}|${dir}|${labels}" >> labels.map
-            echo "   Done."
-          done < /tmp/jobs.txt
-
-          # Show summary
-          create_count=$(jq -c 'select(.type == "create_pull_request")' result.jsonl 2>/dev/null | wc -l || echo 0)
-          update_count=$(jq -c 'select(.type == "update_pull_request")' result.jsonl 2>/dev/null | wc -l || echo 0)
-          echo ""
-          echo "📊 Results: ${create_count} new update(s), ${update_count} existing PR update(s)"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dependabot-result
-          path: |
-            result.jsonl
-            labels.map
-
-  # ── Job 2: Create PRs (write permissions) ────────────────────────────────
-  create-prs:
-    needs: update
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: dependabot-result
-
-      - name: Create or update PRs from Dependabot output
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          if [ ! -s result.jsonl ]; then
-            echo "No updates found."
-            exit 0
-          fi
-
-          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
-          git config user.name "dependabot[bot]"
-
-          count=$(jq -c 'select(.type == "create_pull_request" or .type == "update_pull_request")' result.jsonl | wc -l)
-          if [ "$count" -eq 0 ]; then
-            echo "No PRs to create."
-            exit 0
-          fi
-
-          echo "Processing ${count} update(s)..."
-
-          jq -c 'select(.type == "create_pull_request" or .type == "update_pull_request")' result.jsonl | while read -r event; do
-            PR_TITLE=$(printf '%s' "$event" | jq -r '.data."pr-title"')
-            PR_BODY=$(printf '%s' "$event" | jq -r '.data."pr-body"')
-            COMMIT_MSG=$(printf '%s' "$event" | jq -r '.data."commit-message"')
-            BASE_SHA=$(printf '%s' "$event" | jq -r '.data."base-commit-sha"')
-            BRANCH_NAME="dependabot/$(printf '%s' "$COMMIT_MSG" | sha1sum | cut -d' ' -f1)"
-
+            # ── Run Dependabot CLI ────────────────────────────────────────
             echo ""
-            echo "📦 ${PR_TITLE}"
-            echo "   Branch: ${BRANCH_NAME}"
+            echo "🔍 Checking ${ecosystem} (${directory})..."
+            result_file="/tmp/result.jsonl"
+            > "$result_file"
+            ./dependabot update -f "$job_file" --local repo --timeout 20m < /dev/null > "$result_file" || true
 
-            # Checkout base and create branch
-            git fetch origin
-            git checkout "$BASE_SHA" 2>/dev/null
-            git checkout -B "$BRANCH_NAME"
+            # ── Create PRs from results ───────────────────────────────────
+            pr_count=$(jq -c 'select(.type == "create_pull_request" or .type == "update_pull_request")' "$result_file" 2>/dev/null | wc -l || echo 0)
+            pr_count=$(echo "$pr_count" | xargs)
 
-            # Apply file changes
-            printf '%s' "$event" | jq -c '.data."updated-dependency-files"[]' | while read -r file; do
-              FILE_PATH=$(printf '%s' "$file" | jq -r '(.directory + "/" + .name)' | sed 's|^/||')
-              DELETED=$(printf '%s' "$file" | jq -r '.deleted')
-              if [ "$DELETED" = "true" ]; then
-                git rm -f "$FILE_PATH" 2>/dev/null || true
-              else
-                mkdir -p "$(dirname "$FILE_PATH")"
-                printf '%s' "$file" | jq -r '.content' > "$FILE_PATH"
-                git add "$FILE_PATH"
-              fi
-            done
-
-            # Commit and push
-            git commit -m "$COMMIT_MSG" || { echo "   ⏭️ No changes to commit"; git checkout main; continue; }
-            git push -f origin "$BRANCH_NAME"
-
-            # Create or update PR
-            existing=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number // ""' 2>/dev/null || true)
-            if [ -n "$existing" ]; then
-              echo "   🔄 Updating PR #${existing}"
-              gh pr edit "$existing" --title "$PR_TITLE" --body "$PR_BODY" || true
-            else
-              echo "   ✅ Creating PR"
-              # Resolve labels from mapping
-              PR_DIR=$(printf '%s' "$event" | jq -r '.data."updated-dependency-files"[0].directory // "/"')
-              LABELS="🤖 Dependencies"
-              if [ -f labels.map ]; then
-                mapped=$(grep "|${PR_DIR}|" labels.map | head -1 | cut -d'|' -f3)
-                [ -n "$mapped" ] && LABELS="$mapped"
-              fi
-              # Build --label flags
-              label_args=""
-              IFS=',' read -ra lbl_arr <<< "$LABELS"
-              for lbl in "${lbl_arr[@]}"; do
-                label_args="${label_args} --label \"${lbl}\""
-              done
-              eval gh pr create \
-                --title "$PR_TITLE" \
-                --body "$PR_BODY" \
-                --head "$BRANCH_NAME" \
-                $label_args \
-                || true
+            if [ "$pr_count" -eq 0 ]; then
+              echo "   ✅ Up to date."
+              continue
             fi
 
-            git checkout main 2>/dev/null || true
+            echo "   📦 ${pr_count} update(s) found — creating PRs..."
+
+            while IFS= read -r event; do
+              PR_TITLE=$(printf '%s' "$event" | jq -r '.data."pr-title"')
+              PR_BODY=$(printf '%s' "$event" | jq -r '.data."pr-body"')
+              COMMIT_MSG=$(printf '%s' "$event" | jq -r '.data."commit-message"')
+              BASE_SHA=$(printf '%s' "$event" | jq -r '.data."base-commit-sha"')
+              BRANCH_NAME="dependabot/$(printf '%s' "$COMMIT_MSG" | sha1sum | cut -d' ' -f1)"
+
+              echo "   → ${PR_TITLE}"
+
+              cd repo
+              git fetch origin
+              git checkout "$BASE_SHA" 2>/dev/null || git checkout "${BRANCH}" 2>/dev/null || true
+              git checkout -B "$BRANCH_NAME"
+
+              # Apply file changes
+              while IFS= read -r file; do
+                FILE_PATH=$(printf '%s' "$file" | jq -r '(.directory + "/" + .name)' | sed 's|^/||')
+                DELETED=$(printf '%s' "$file" | jq -r '.deleted')
+                if [ "$DELETED" = "true" ]; then
+                  git rm -f "$FILE_PATH" 2>/dev/null || true
+                else
+                  mkdir -p "$(dirname "$FILE_PATH")"
+                  printf '%s' "$file" | jq -r '.content' > "$FILE_PATH"
+                  git add "$FILE_PATH"
+                fi
+              done < <(printf '%s' "$event" | jq -c '.data."updated-dependency-files"[]')
+
+              # Commit and push
+              if ! git commit -m "$COMMIT_MSG"; then
+                echo "   ⏭️ No changes to commit"
+                git checkout "${BRANCH}" 2>/dev/null || true
+                cd ..
+                continue
+              fi
+              git push -f origin "$BRANCH_NAME"
+
+              # Create or update PR
+              existing=$(gh pr list --head "$BRANCH_NAME" --json number --jq '.[0].number // ""' 2>/dev/null || true)
+              if [ -n "$existing" ]; then
+                echo "   🔄 Updating PR #${existing}"
+                gh pr edit "$existing" --title "$PR_TITLE" --body "$PR_BODY" || true
+                total_updated=$((total_updated + 1))
+              else
+                echo "   ✅ Creating PR"
+                label_flags=()
+                IFS=',' read -ra lbl_arr <<< "$labels"
+                for lbl in "${lbl_arr[@]}"; do
+                  label_flags+=(--label "$lbl")
+                done
+                gh pr create \
+                  --title "$PR_TITLE" \
+                  --body "$PR_BODY" \
+                  --head "$BRANCH_NAME" \
+                  "${label_flags[@]}" \
+                  || true
+                total_created=$((total_created + 1))
+              fi
+
+              # Reset for next iteration
+              git checkout "${BRANCH}" 2>/dev/null || true
+              cd ..
+            done < <(jq -c 'select(.type == "create_pull_request" or .type == "update_pull_request")' "$result_file")
+
+            # Ensure clean state for next CLI run
+            git -C repo checkout "${BRANCH}" 2>/dev/null || true
+            git -C repo clean -fd 2>/dev/null || true
+            git -C repo checkout -- . 2>/dev/null || true
           done
+
+          echo ""
+          echo "📊 Summary: ${total_created} PR(s) created, ${total_updated} PR(s) updated"
