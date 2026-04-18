@@ -81,6 +81,7 @@ jobs:
           IFS=',' read -ra filter_list <<< "${FILTER:-}"
 
           update_count=$(yq '.updates | length' "$config")
+          job_idx=-1
 
           for i in $(seq 0 $((update_count - 1))); do
             ecosystem=$(yq ".updates[$i].package-ecosystem" "$config")
@@ -95,11 +96,44 @@ jobs:
             fi
 
             pm=$(map_ecosystem "$ecosystem")
-            directory=$(yq ".updates[$i].directory // \"/\"" "$config")
-            job_file="/tmp/job-${i}.yml"
 
-            # Build job section
-            cat > "$job_file" << JOBEOF
+            # Read labels (default: 🤖 Dependencies)
+            label_count=$(yq ".updates[$i].labels | length // 0" "$config")
+            labels="🤖 Dependencies"
+            if [ "$label_count" -gt 0 ]; then
+              labels=""
+              for l in $(seq 0 $((label_count - 1))); do
+                lbl=$(yq ".updates[$i].labels[$l]" "$config")
+                [ -n "$labels" ] && labels="${labels},"
+                labels="${labels}${lbl}"
+              done
+            fi
+
+            # Resolve directories: support both "directory" (singular) and "directories" (plural with globs)
+            dirs=()
+            dir_count=$(yq ".updates[$i].directories | length // 0" "$config")
+            if [ "$dir_count" -gt 0 ]; then
+              # Expand glob patterns against the local checkout
+              for d in $(seq 0 $((dir_count - 1))); do
+                glob_pattern=$(yq ".updates[$i].directories[$d]" "$config")
+                # Strip leading / for filesystem glob, then re-add
+                rel_pattern="${glob_pattern#/}"
+                for match in repo/${rel_pattern}; do
+                  [ -d "$match" ] || continue
+                  dir_path="/${match#repo/}"
+                  dirs+=("$dir_path")
+                done
+              done
+            else
+              dirs+=("$(yq ".updates[$i].directory // \"/\"" "$config")")
+            fi
+
+            # Generate one job file per resolved directory
+            for directory in "${dirs[@]}"; do
+              job_idx=$((job_idx + 1))
+              job_file="/tmp/job-${job_idx}.yml"
+
+              cat > "$job_file" << JOBEOF
           job:
             package-manager: ${pm}
             allowed-updates:
@@ -112,28 +146,39 @@ jobs:
               branch: ${BRANCH}
           JOBEOF
 
-            # Add dependency groups if present (must be inside job: block)
-            group_count=$(yq ".updates[$i].groups | length // 0" "$config")
-            if [ "$group_count" -gt 0 ]; then
-              {
-                echo "  dependency-groups:"
-                for g in $(yq ".updates[$i].groups | keys | .[]" "$config"); do
-                  echo "    - name: ${g}"
-                  echo "      rules:"
-                  pattern_count=$(yq ".updates[$i].groups.${g}.patterns | length // 0" "$config")
-                  if [ "$pattern_count" -gt 0 ]; then
-                    echo "        patterns:"
-                    for p in $(seq 0 $((pattern_count - 1))); do
-                      pattern=$(yq ".updates[$i].groups.${g}.patterns[$p]" "$config")
-                      echo "          - \"${pattern}\""
-                    done
-                  fi
-                done
-              } >> "$job_file"
-            fi
+              # Add commit-message options if present
+              cm_prefix=$(yq ".updates[$i].commit-message.prefix // \"\"" "$config")
+              cm_include=$(yq ".updates[$i].commit-message.include // \"\"" "$config")
+              if [ -n "$cm_prefix" ] && [ "$cm_prefix" != "null" ]; then
+                {
+                  echo "  commit-message-options:"
+                  echo "    prefix: \"${cm_prefix}\""
+                  [ -n "$cm_include" ] && [ "$cm_include" != "null" ] && echo "    include-scope: \"${cm_include}\""
+                } >> "$job_file"
+              fi
 
-            # Add credentials section (after job: block)
-            cat >> "$job_file" << 'CREDEOF'
+              # Add dependency groups if present (must be inside job: block)
+              group_count=$(yq ".updates[$i].groups | length // 0" "$config")
+              if [ "$group_count" -gt 0 ]; then
+                {
+                  echo "  dependency-groups:"
+                  for g in $(yq ".updates[$i].groups | keys | .[]" "$config"); do
+                    echo "    - name: ${g}"
+                    echo "      rules:"
+                    pattern_count=$(yq ".updates[$i].groups.${g}.patterns | length // 0" "$config")
+                    if [ "$pattern_count" -gt 0 ]; then
+                      echo "        patterns:"
+                      for p in $(seq 0 $((pattern_count - 1))); do
+                        pattern=$(yq ".updates[$i].groups.${g}.patterns[$p]" "$config")
+                        echo "          - \"${pattern}\""
+                      done
+                    fi
+                  done
+                } >> "$job_file"
+              fi
+
+              # Add credentials section (after job: block)
+              cat >> "$job_file" << 'CREDEOF'
           credentials:
             - type: git_source
               host: github.com
@@ -141,8 +186,9 @@ jobs:
               password: $GITHUB_TOKEN
           CREDEOF
 
-            echo "${pm}|${directory}|${job_file}" >> /tmp/jobs.txt
-            echo "Generated job file for ${ecosystem} (${directory})"
+              echo "${pm}|${directory}|${job_file}|${labels}" >> /tmp/jobs.txt
+              echo "Generated job file for ${ecosystem} (${directory})"
+            done
           done
 
       - name: Run Dependabot CLI
@@ -157,9 +203,11 @@ jobs:
             exit 0
           fi
 
-          while IFS='|' read -r pm dir job_file; do
+          > labels.map
+          while IFS='|' read -r pm dir job_file labels; do
             echo "🔍 Checking ${pm} (${dir})..."
             ./dependabot update -f "$job_file" --local repo --timeout 20m < /dev/null >> result.jsonl || true
+            echo "${pm}|${dir}|${labels}" >> labels.map
             echo "   Done."
           done < /tmp/jobs.txt
 
@@ -172,7 +220,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dependabot-result
-          path: result.jsonl
+          path: |
+            result.jsonl
+            labels.map
 
   # ── Job 2: Create PRs (write permissions) ────────────────────────────────
   create-prs:
@@ -250,11 +300,24 @@ jobs:
               gh pr edit "$existing" --title "$PR_TITLE" --body "$PR_BODY" || true
             else
               echo "   ✅ Creating PR"
-              gh pr create \
+              # Resolve labels from mapping
+              PR_DIR=$(printf '%s' "$event" | jq -r '.data."updated-dependency-files"[0].directory // "/"')
+              LABELS="🤖 Dependencies"
+              if [ -f labels.map ]; then
+                mapped=$(grep "|${PR_DIR}|" labels.map | head -1 | cut -d'|' -f3)
+                [ -n "$mapped" ] && LABELS="$mapped"
+              fi
+              # Build --label flags
+              label_args=""
+              IFS=',' read -ra lbl_arr <<< "$LABELS"
+              for lbl in "${lbl_arr[@]}"; do
+                label_args="${label_args} --label \"${lbl}\""
+              done
+              eval gh pr create \
                 --title "$PR_TITLE" \
                 --body "$PR_BODY" \
                 --head "$BRANCH_NAME" \
-                --label "🤖 Dependencies" \
+                $label_args \
                 || true
             fi
 
