@@ -1,0 +1,36 @@
+name: Trigger Dependabot
+description: >
+  Trigger on-demand Dependabot updates in any repository via repository_dispatch.
+  The target repo must have a dependabot-on-demand.yml receiver workflow.
+  For cross-repo triggers, pass a PAT with contents:write scope.
+
+inputs:
+  repo:
+    description: 'Target repository (owner/name). Defaults to current repo.'
+    required: false
+    default: ${{ github.repository }}
+  reason:
+    description: 'Why Dependabot is being triggered (shown in workflow log).'
+    required: false
+    default: ''
+  token:
+    description: 'GitHub token. Use a PAT with contents:write for cross-repo triggers.'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Dispatch trigger-dependabot event
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        TARGET_REPO: ${{ inputs.repo }}
+        REASON: ${{ inputs.reason }}
+      run: |
+        set -euo pipefail
+        echo "🔔 Triggering Dependabot in ${TARGET_REPO}..."
+        gh api --method POST "/repos/${TARGET_REPO}/dispatches" \
+          -f "event_type=trigger-dependabot" \
+          -f "client_payload[reason]=${REASON}"
+        echo "✅ Dispatched trigger-dependabot to ${TARGET_REPO}"

@@ -74,6 +74,17 @@ on:
         required: false
         type: string
         default: '2'
+      wave-delay-minutes:
+        description: Delay (minutes) between sequential waves.
+        required: false
+        type: string
+        default: '0'
+    secrets:
+      dispatch-token:
+        description: >-
+          PAT or GitHub App token with contents:write for cross-repo
+          repository_dispatch. Falls back to GITHUB_TOKEN (same-repo only).
+        required: false
 
 permissions:
   contents: write
@@ -318,6 +329,7 @@ jobs:
       - name: Process waves + auto-discover remaining
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISPATCH_TOKEN: ${{ secrets.dispatch-token || secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           DRAFT_TAGS: ${{ inputs.draft-tags }}
           DRY_RUN: ${{ inputs.dry-run }}
@@ -325,6 +337,7 @@ jobs:
           BOT_LOGINS: ${{ inputs.bot-logins }}
           DEDUPE: ${{ inputs.dedupe }}
           DELAY_MINUTES: ${{ inputs.publish-delay-minutes }}
+          WAVE_DELAY_MINUTES: ${{ inputs.wave-delay-minutes }}
           PLAN_PATH: ${{ inputs.release-plan-path }}
         shell: bash
         run: |
@@ -343,6 +356,12 @@ jobs:
           fi
 
           wave_count=$(yq '.waves | length // 0' "$PLAN_PATH")
+
+          # ── Read delays from manifest (override workflow inputs) ──
+          plan_wave_delay=$(yq '.wave-delay-minutes // ""' "$PLAN_PATH")
+          plan_publish_delay=$(yq '.publish-delay-minutes // ""' "$PLAN_PATH")
+          [ -n "$plan_wave_delay" ] && WAVE_DELAY_MINUTES="$plan_wave_delay"
+          [ -n "$plan_publish_delay" ] && DELAY_MINUTES="$plan_publish_delay"
 
           # ── Fetch all releases once ────────────────────────────────
           releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
@@ -400,6 +419,59 @@ jobs:
             find_prev "$prefix"
           }
 
+          # ── run_hooks: execute post-release hooks for a module ────
+          run_hooks() {
+            local name="$1"
+            local tag="$2"
+            local hooks="$3"
+
+            if [ -z "$hooks" ] || [ "$hooks" = "null" ] || [ "$hooks" = "[]" ]; then
+              return
+            fi
+
+            local hook_count
+            hook_count=$(printf '%s' "$hooks" | jq 'length')
+
+            for hi in $(seq 0 $((hook_count - 1))); do
+              local action
+              action=$(printf '%s' "$hooks" | jq -r ".[$hi].action")
+
+              case "$action" in
+                dispatch)
+                  local repo event directory ecosystem
+                  repo=$(printf '%s' "$hooks" | jq -r ".[$hi].repo // \"${GH_REPO}\"")
+                  event=$(printf '%s' "$hooks" | jq -r ".[$hi].event")
+                  directory=$(printf '%s' "$hooks" | jq -r ".[$hi].directory // \"/\"")
+                  ecosystem=$(printf '%s' "$hooks" | jq -r ".[$hi][\"package-ecosystem\"] // \"gomod\"")
+
+                  local payload
+                  payload=$(jq -n \
+                    --arg module "$name" \
+                    --arg tag "$tag" \
+                    --arg source "$GH_REPO" \
+                    --arg dir "$directory" \
+                    --arg eco "$ecosystem" \
+                    '{module: $module, tag: $tag, source_repository: $source, directory: $dir, package_ecosystem: $eco}')
+
+                  if [ "$DRY_RUN" = "true" ]; then
+                    echo "  - 🔔 (dry-run) Would dispatch \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
+                  else
+                    if GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "/repos/${repo}/dispatches" \
+                      -f "event_type=${event}" \
+                      --argjson "client_payload" "$payload" 2>/dev/null; then
+                      echo "  - 🔔 Dispatched \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
+                    else
+                      echo "  - ⚠️ Failed to dispatch \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
+                    fi
+                  fi
+                  ;;
+                *)
+                  echo "  - ⚠️ Unknown hook action: \`$action\`" >> "$GITHUB_STEP_SUMMARY"
+                  ;;
+              esac
+            done
+          }
+
           # ── process_module: shared logic for one draft release ─────
           published=0
           skipped=0
@@ -409,6 +481,7 @@ jobs:
           process_module() {
             local name="$1"
             local draft="$2"
+            local module_hooks="${3:-[]}"
 
             local draft_id draft_tag draft_body
             draft_id=$(printf '%s' "$draft" | jq -r '.id')
@@ -487,8 +560,10 @@ jobs:
               2> "$RUNNER_TEMP/cleanup.log" || true
 
             # Publish or dry-run
+            echo "- 📦 \`$name\` (\`$draft_tag\`): preparing at $(date -u +%H:%M:%S) UTC..." >> "$GITHUB_STEP_SUMMARY"
+
             if [ "$DRY_RUN" = "true" ]; then
-              echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run**" >> "$GITHUB_STEP_SUMMARY"
+              echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
               {
                 echo "<details><summary>Diff for $name</summary>"
                 echo ""
@@ -497,15 +572,17 @@ jobs:
                 echo '```'
                 echo "</details>"
               } >> "$GITHUB_STEP_SUMMARY"
+              run_hooks "$name" "$draft_tag" "$module_hooks"
               ((published++)) || true
             else
               local payload
               payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
               if printf '%s' "$payload" | gh api --method PATCH "/repos/${GH_REPO}/releases/${draft_id}" --input - > /dev/null 2>&1; then
-                echo "- ✅ \`$name\` (\`$draft_tag\`): **published**" >> "$GITHUB_STEP_SUMMARY"
+                echo "- ✅ \`$name\` (\`$draft_tag\`): **published** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
+                run_hooks "$name" "$draft_tag" "$module_hooks"
                 ((published++)) || true
               else
-                echo "- ❌ \`$name\` (\`$draft_tag\`): **FAILED**" >> "$GITHUB_STEP_SUMMARY"
+                echo "- ❌ \`$name\` (\`$draft_tag\`): **FAILED** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
                 ((failed++)) || true
               fi
             fi
@@ -515,6 +592,13 @@ jobs:
           for wi in $(seq 0 $((wave_count - 1))); do
             wave_name=$(yq ".waves[$wi].name" "$PLAN_PATH")
             auto_discover=$(yq ".waves[$wi].auto-discover // false" "$PLAN_PATH")
+
+            # Wave delay (skip before the very first wave)
+            if [ "$wi" -gt 0 ] && [ "${WAVE_DELAY_MINUTES:-0}" -gt 0 ] && [ "$DRY_RUN" != "true" ]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "⏳ Wave delay: waiting ${WAVE_DELAY_MINUTES}m before wave $((wi+1)) ($wave_name)..." >> "$GITHUB_STEP_SUMMARY"
+              sleep "$((WAVE_DELAY_MINUTES * 60))"
+            fi
 
             echo "" >> "$GITHUB_STEP_SUMMARY"
 
@@ -541,7 +625,7 @@ jobs:
                 draft_tag=$(printf '%s' "$draft" | jq -r '.tag_name')
                 # Derive a display name from the tag (strip version suffix)
                 name=$(printf '%s' "$draft_tag" | sed -E 's|/v[0-9].*||')
-                process_module "$name" "$draft"
+                process_module "$name" "$draft" "[]"
               done
             else
               # ── Explicit wave: process listed modules ────────────────
@@ -551,6 +635,7 @@ jobs:
               for mi in $(seq 0 $((module_count - 1))); do
                 name=$(yq ".waves[$wi].modules[$mi].name" "$PLAN_PATH")
                 tag_prefix=$(yq ".waves[$wi].modules[$mi].tag-prefix // \"\"" "$PLAN_PATH")
+                hooks=$(yq -o=json ".waves[$wi].modules[$mi].post-release // []" "$PLAN_PATH")
 
                 draft=$(find_draft "$tag_prefix")
                 if [ -z "$draft" ]; then
@@ -559,7 +644,7 @@ jobs:
                   continue
                 fi
 
-                process_module "$name" "$draft"
+                process_module "$name" "$draft" "$hooks"
               done
             fi
           done
