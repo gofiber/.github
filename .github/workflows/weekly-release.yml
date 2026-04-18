@@ -309,6 +309,8 @@ jobs:
 
       - name: Build cleanup tool
         shell: bash
+        env:
+          GOWORK: 'off'
         run: |
           cd .central/.github/actions/clean-release-notes
           go build -trimpath -o "$RUNNER_TEMP/release-notes-cleanup" ./
