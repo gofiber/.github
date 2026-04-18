@@ -159,7 +159,7 @@ jobs:
 
           while IFS='|' read -r pm dir job_file; do
             echo "🔍 Checking ${pm} (${dir})..."
-            ./dependabot update -f "$job_file" --local repo --timeout 20m >> result.jsonl || true
+            ./dependabot update -f "$job_file" --local repo --timeout 20m < /dev/null >> result.jsonl || true
             echo "   Done."
           done < /tmp/jobs.txt
 
