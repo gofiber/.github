@@ -13,6 +13,10 @@ inputs:
     description: 'Why Dependabot is being triggered (shown in workflow log).'
     required: false
     default: ''
+  delay-minutes:
+    description: 'Minutes to wait before triggering (lets registries index new releases).'
+    required: false
+    default: '5'
   token:
     description: 'GitHub token. Use a PAT with contents:write for cross-repo triggers.'
     required: false
@@ -21,6 +25,13 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Wait for registries to index
+      if: inputs.delay-minutes != '0'
+      shell: bash
+      run: |
+        echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
+        sleep $(( ${{ inputs.delay-minutes }} * 60 ))
+
     - name: Dispatch trigger-dependabot event
       shell: bash
       env:
