@@ -1,11 +1,5 @@
 name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
-commitish: v2
-filter-by-commitish: true
-include-labels:
-  - 'v2'
-exclude-labels:
-  - 'v3'
 categories:
   - title: '❗ Breaking Changes'
     labels:
@@ -24,11 +18,12 @@ categories:
   - title: '🛠️ Maintenance'
     labels:
       - '🤖 Dependencies'
+    collapse-after: 0
   - title: '📚 Documentation'
     labels:
       - '📒 Documentation'
 change-template: '- $TITLE (#$NUMBER)'
-change-title-escapes: '\\<*_&' # You can add # and @ to disable mentions, and add ` to disable code blocks.
+change-title-escapes: '\<*_&'
 exclude-contributors:
   - dependabot
   - dependabot[bot]

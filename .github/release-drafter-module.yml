@@ -1,0 +1,12 @@
+_extends: gofiber/.github:release-drafter.yml
+name-template: '{{MODULE}} - v$RESOLVED_VERSION'
+tag-template: '{{MODULE}}/v$RESOLVED_VERSION'
+tag-prefix: {{MODULE}}/v
+include-paths:
+  - {{MODULE}}
+template: |
+    $CHANGES
+
+    **Full Changelog**: https://github.com/$OWNER/$REPOSITORY/compare/$PREVIOUS_TAG...{{MODULE}}/v$RESOLVED_VERSION
+
+    Thank you $CONTRIBUTORS for making this update possible.
