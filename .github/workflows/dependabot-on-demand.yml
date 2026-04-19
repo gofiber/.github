@@ -7,6 +7,10 @@ name: dependabot-on-demand
 
 on:
   workflow_call:
+    secrets:
+      push-token:
+        description: 'PAT with push access (for protected branches). Falls back to github.token.'
+        required: false
 
 jobs:
   trigger:
@@ -15,6 +19,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.push-token || github.token }}
 
       - name: Trigger Dependabot
         run: |
