@@ -130,7 +130,7 @@ func TestFilterBotContributors(t *testing.T) {
 			name: "mixed keeps humans, drops bots",
 			in:   "## Fixes\n- bug (#1)\n\nThank you @alice @dependabot[bot] @bob for making this update possible.\n",
 			bots: []string{"dependabot[bot]"},
-			want: "## Fixes\n- bug (#1)\n\nThank you @alice @bob for making this update possible.\n",
+			want: "## Fixes\n- bug (#1)\n\nThank you @alice and @bob for making this update possible.\n",
 		},
 		{
 			name: "no Thank-you line is a no-op",

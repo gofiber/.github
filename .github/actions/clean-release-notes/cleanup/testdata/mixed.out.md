@@ -9,4 +9,4 @@
 
 **Full Changelog**: https://github.com/gofiber/demo/compare/v1.2.3...v1.3.0
 
-Thank you @alice @bob for making this update possible.
+Thank you @alice and @bob for making this update possible.

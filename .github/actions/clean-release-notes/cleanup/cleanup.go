@@ -326,8 +326,18 @@ func (b *Body) FilterBotContributors(keywords []string, warn func(string)) {
 				warn(fmt.Sprintf("removed contributor footer (all %d authors were bots)", dropped))
 			}
 		case dropped > 0:
-			rebuilt := strings.Join(kept, " ")
-			b.Epilogue[i] = "Thank you " + rebuilt + " for making this update possible."
+			var rebuilt string
+			if len(kept) == 1 {
+				rebuilt = kept[0]
+			} else {
+				rebuilt = strings.Join(kept[:len(kept)-1], ", ") + " and " + kept[len(kept)-1]
+			}
+			// Preserve the original wording (update/release/etc.)
+			suffix := "for making this update possible."
+			if strings.Contains(ln, "release possible") {
+				suffix = "for making this release possible."
+			}
+			b.Epilogue[i] = "Thank you " + rebuilt + " " + suffix
 			if warn != nil {
 				warn(fmt.Sprintf("filtered %d bot(s) from contributor footer", dropped))
 			}
