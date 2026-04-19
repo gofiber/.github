@@ -7,7 +7,7 @@ on:
   workflow_call:
     inputs:
       repos:
-        description: 'JSON array of repos to trigger (e.g. ["gofiber/recipes"])'
+        description: 'Newline-separated list of repos to trigger.'
         required: true
         type: string
       delay-minutes:
@@ -23,6 +23,8 @@ on:
 jobs:
   wait:
     runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
     steps:
       - name: Wait for registries to index
         if: inputs.delay-minutes > 0
@@ -30,12 +32,20 @@ jobs:
           echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
           sleep $(( ${{ inputs.delay-minutes }} * 60 ))
 
+      - name: Build matrix
+        id: parse
+        run: |
+          matrix=$(echo "$REPOS" | sed 's/^[[:space:]]*-[[:space:]]*//' | grep -v '^\s*$' | jq -Rsc 'split("\n") | map(select(length > 0))')
+          echo "matrix=${matrix}" >> "$GITHUB_OUTPUT"
+        env:
+          REPOS: ${{ inputs.repos }}
+
   trigger:
     needs: wait
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        repo: ${{ fromJson(inputs.repos) }}
+        repo: ${{ fromJson(needs.wait.outputs.matrix) }}
     steps:
       - uses: gofiber/.github/.github/actions/trigger-dependabot@main
         with:
