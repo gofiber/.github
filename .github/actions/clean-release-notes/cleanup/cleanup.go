@@ -34,6 +34,7 @@ import (
 // to every caller (CLI + composite action).
 var DefaultBotKeywords = []string{
 	"[bot]",
+	"anthropic",
 	"claude",
 	"copilot",
 	"codex",
@@ -153,7 +154,7 @@ var emojiRe = regexp.MustCompile(
 // convCommitRe matches a conventional-commit prefix at the start of a
 // bullet's text. Case-insensitive. Handles optional scope and breaking "!".
 var convCommitRe = regexp.MustCompile(
-	`^(?i)(feat|fix|docs|chore|refactor|test|ci|perf|build|style|revert)(\([^)]+\))?!?:\s+`,
+	`^(?i)(feat|fix|bug|docs|doc|chore|refactor|test|ci|perf|build|style|revert)(\([^)]+\))?!?:\s+`,
 )
 
 // prRefRe captures "#NNN" references inside a bullet.
@@ -162,11 +163,15 @@ var prRefRe = regexp.MustCompile(`#(\d+)`)
 // thankYouRe matches the contributor footer release-drafter emits. The
 // capture group holds the raw "@login" list.
 var thankYouRe = regexp.MustCompile(
-	`^Thank you(?: to)?\s+(.+?)\s+for making this update possible\.?\s*$`,
+	`^Thank you(?: to)?\s+(.+?)\s+for making this (?:update|release) possible\.?\s*$`,
 )
 
-// mentionRe finds "@login" mentions. We allow the GitHub-app "[bot]" suffix.
-var mentionRe = regexp.MustCompile(`@([A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?)`)
+// contributorRe finds both "@login" mentions and "[login[bot]](url)" markdown
+// links in the contributor footer. Group 1 captures @mention logins, group 2
+// captures markdown-link bot logins.
+var contributorRe = regexp.MustCompile(
+	`(?:@([A-Za-z0-9][A-Za-z0-9-]*(?:\[bot\])?)|\[([A-Za-z0-9][A-Za-z0-9-]*\[bot\])\]\([^)]+\))`,
+)
 
 // Parse splits body into Preamble / Sections / Epilogue.
 //
@@ -294,11 +299,14 @@ func (b *Body) FilterBotContributors(keywords []string, warn func(string)) {
 		if m == nil {
 			continue
 		}
-		mentions := mentionRe.FindAllStringSubmatch(m[1], -1)
+		mentions := contributorRe.FindAllStringSubmatch(m[1], -1)
 		var kept []string
 		dropped := 0
 		for _, mn := range mentions {
-			login := mn[1]
+			login := mn[1] // @mention format
+			if login == "" {
+				login = mn[2] // [bot](url) markdown format
+			}
 			if isBot(login, keywords) {
 				dropped++
 				continue
