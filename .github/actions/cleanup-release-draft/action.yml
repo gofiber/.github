@@ -22,18 +22,18 @@ runs:
       run: |
         set -euo pipefail
         release=$(gh api "repos/${REPO}/releases" \
-          --jq ".[] | select(.draft == true and .tag_name == \"${TAG}\")" \
+          --jq ".[] | select(.draft == true and (.tag_name == \"${TAG}\" or .name == \"${TAG}\"))" \
           2>/dev/null || true)
 
         if [ -z "$release" ]; then
-          echo "❌ No draft release found for tag ${TAG}"
+          echo "❌ No draft release found for tag or name ${TAG}"
           echo "found=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi
 
         echo "found=true" >> "$GITHUB_OUTPUT"
         echo "id=$(printf '%s' "$release" | jq -r '.id')" >> "$GITHUB_OUTPUT"
-        echo "📦 Found draft: ${TAG}"
+        echo "📦 Found draft: $(printf '%s' "$release" | jq -r '.name // .tag_name')"
 
     - name: Clean release notes
       if: steps.draft.outputs.found == 'true'
