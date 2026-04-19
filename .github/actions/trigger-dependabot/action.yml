@@ -9,39 +9,22 @@ inputs:
     description: 'Target repository (owner/name). Defaults to current repo.'
     required: false
     default: ${{ github.repository }}
-  reason:
-    description: 'Why Dependabot is being triggered (shown in workflow log).'
-    required: false
-    default: ''
-  delay-minutes:
-    description: 'Minutes to wait before triggering (lets registries index new releases).'
-    required: false
-    default: '5'
   token:
-    description: 'GitHub token. Use a PAT with contents:write for cross-repo triggers.'
+    description: 'GitHub token. Use a PAT for cross-repo triggers.'
     required: false
     default: ${{ github.token }}
 
 runs:
   using: composite
   steps:
-    - name: Wait for registries to index
-      if: inputs.delay-minutes != '0'
-      shell: bash
-      run: |
-        echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
-        sleep $(( ${{ inputs.delay-minutes }} * 60 ))
-
     - name: Dispatch trigger-dependabot event
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.token }}
         TARGET_REPO: ${{ inputs.repo }}
-        REASON: ${{ inputs.reason }}
       run: |
         set -euo pipefail
         echo "🔔 Triggering Dependabot in ${TARGET_REPO}..."
         gh api --method POST "/repos/${TARGET_REPO}/dispatches" \
-          -f "event_type=trigger-dependabot" \
-          -f "client_payload[reason]=${REASON}"
-        echo "✅ Dispatched trigger-dependabot to ${TARGET_REPO}"
+          -f "event_type=trigger-dependabot"
+        echo "✅ Dispatched to ${TARGET_REPO}"

@@ -1,0 +1,43 @@
+name: after-release
+
+# Reusable workflow that waits for registries to index a new release,
+# then triggers Dependabot in the given repos.
+
+on:
+  workflow_call:
+    inputs:
+      repos:
+        description: 'JSON array of repos to trigger (e.g. ["gofiber/recipes"])'
+        required: true
+        type: string
+      delay-minutes:
+        description: 'Minutes to wait for registries to index the new release.'
+        required: false
+        type: number
+        default: 5
+    secrets:
+      dispatch-token:
+        description: 'PAT with contents:write for cross-repo dispatch'
+        required: true
+
+jobs:
+  wait:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for registries to index
+        if: inputs.delay-minutes > 0
+        run: |
+          echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
+          sleep $(( ${{ inputs.delay-minutes }} * 60 ))
+
+  trigger:
+    needs: wait
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        repo: ${{ fromJson(inputs.repos) }}
+    steps:
+      - uses: gofiber/.github/.github/actions/trigger-dependabot@main
+        with:
+          repo: ${{ matrix.repo }}
+          token: ${{ secrets.dispatch-token }}
