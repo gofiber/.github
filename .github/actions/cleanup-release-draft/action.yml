@@ -1,0 +1,44 @@
+name: Cleanup Release Draft
+description: >
+  Find a draft release by tag and clean the release notes using the
+  clean-release-notes tool (strip emoji prefixes, drop bot contributors,
+  dedupe PR references).
+
+inputs:
+  tag:
+    description: 'Tag of the draft release.'
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Find draft release
+      id: draft
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        TAG: ${{ inputs.tag }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        release=$(gh api "repos/${REPO}/releases" \
+          --jq ".[] | select(.draft == true and .tag_name == \"${TAG}\")" \
+          2>/dev/null || true)
+
+        if [ -z "$release" ]; then
+          echo "❌ No draft release found for tag ${TAG}"
+          echo "found=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "found=true" >> "$GITHUB_OUTPUT"
+        echo "id=$(printf '%s' "$release" | jq -r '.id')" >> "$GITHUB_OUTPUT"
+        echo "📦 Found draft: ${TAG}"
+
+    - name: Clean release notes
+      if: steps.draft.outputs.found == 'true'
+      uses: gofiber/.github/.github/actions/clean-release-notes@main
+      with:
+        release-id: ${{ steps.draft.outputs.id }}
+      env:
+        GH_TOKEN: ${{ github.token }}
