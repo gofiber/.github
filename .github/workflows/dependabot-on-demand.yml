@@ -26,7 +26,16 @@ jobs:
         run: |
           file=".github/dependabot.yml"
           [ -x "$file" ] && chmod -x "$file" || chmod +x "$file"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git commit -am "chore(ci): trigger dependabot [skip ci]"
-          git push
+
+          MSG="chore(ci): trigger dependabot [skip ci]"
+
+          if [ "$(git log -1 --pretty=%s)" = "$MSG" ]; then
+            git commit -am "$MSG" --amend
+            git push --force-with-lease
+          else
+            git commit -am "$MSG"
+            git push
+          fi
