@@ -169,16 +169,45 @@ jobs:
             exit 0
           fi
 
+          # has_real_changes: reads a release body from stdin and returns 0
+          # if it contains changes beyond CI (GitHub Actions) and documentation.
+          # Documentation sections are skipped entirely. Maintenance bullets are
+          # checked via the PR branch name — Dependabot uses "github_actions"
+          # in the branch for GitHub Actions updates.
+          has_real_changes() {
+            local section=""
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^##\  ]]; then
+                if [[ "$line" =~ [Dd]ocumentation ]]; then
+                  section="docs"
+                elif [[ "$line" =~ [Mm]aintenance ]]; then
+                  section="maintenance"
+                else
+                  section="other"
+                fi
+                continue
+              fi
+              [[ "$section" == "docs" ]] && continue
+              if [[ "$line" =~ ^-\ .*(#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+) ]]; then
+                if [[ "$section" == "maintenance" ]]; then
+                  local pr_num
+                  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+                  if [ -n "$pr_num" ]; then
+                    local branch
+                    branch=$(gh pr view "$pr_num" --repo "$GH_REPO" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+                    if [[ "$branch" == *github_actions* ]]; then
+                      continue
+                    fi
+                  fi
+                fi
+                return 0
+              fi
+            done
+            return 1
+          }
+
           # Skip if the only changes are CI (GitHub Actions) and/or documentation
-          if ! awk '
-            /^## .*Documentation/{ skip=1; next }
-            /^## .*Maintenance/{ skip=2; next }
-            /^## /{ skip=0 }
-            skip==1{ next }
-            skip==2 && /^- / && /actions\/|\.github\//{ next }
-            /^- .*(#[0-9]+|\/(pull|issues?)\/[0-9]+)/{ found=1; exit }
-            END{ exit !found }
-          ' "$RUNNER_TEMP/draft_body.md"; then
+          if ! has_real_changes < "$RUNNER_TEMP/draft_body.md"; then
             tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ Draft \`${tag}\` contains only CI/docs changes — skipped." >> "$GITHUB_STEP_SUMMARY"
@@ -489,6 +518,43 @@ jobs:
             find_prev "$prefix"
           }
 
+          # ── has_real_changes: checks if a draft body has changes ───
+          # beyond CI (GitHub Actions) and documentation. Reads from stdin.
+          # Documentation sections are skipped entirely. Maintenance bullets
+          # are checked via the PR branch name — Dependabot uses
+          # "github_actions" in the branch for GitHub Actions updates.
+          has_real_changes() {
+            local section=""
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^##\  ]]; then
+                if [[ "$line" =~ [Dd]ocumentation ]]; then
+                  section="docs"
+                elif [[ "$line" =~ [Mm]aintenance ]]; then
+                  section="maintenance"
+                else
+                  section="other"
+                fi
+                continue
+              fi
+              [[ "$section" == "docs" ]] && continue
+              if [[ "$line" =~ ^-\ .*(#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+) ]]; then
+                if [[ "$section" == "maintenance" ]]; then
+                  local pr_num
+                  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
+                  if [ -n "$pr_num" ]; then
+                    local branch
+                    branch=$(gh pr view "$pr_num" --repo "$GH_REPO" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
+                    if [[ "$branch" == *github_actions* ]]; then
+                      continue
+                    fi
+                  fi
+                fi
+                return 0
+              fi
+            done
+            return 1
+          }
+
           # ── run_hooks: execute post-release hooks for a module ────
           run_hooks() {
             local name="$1"
@@ -582,15 +648,7 @@ jobs:
             fi
 
             # Skip if the only changes are CI (GitHub Actions) and/or documentation
-            if ! printf '%s' "$draft_body" | awk '
-              /^## .*Documentation/{ skip=1; next }
-              /^## .*Maintenance/{ skip=2; next }
-              /^## /{ skip=0 }
-              skip==1{ next }
-              skip==2 && /^- / && /actions\/|\.github\//{ next }
-              /^- .*(#[0-9]+|\/(pull|issues?)\/[0-9]+)/{ found=1; exit }
-              END{ exit !found }
-            '; then
+            if ! printf '%s' "$draft_body" | has_real_changes; then
               echo "⏭️  Skipped: $name ($draft_tag) — CI/docs changes only"
               echo "- ⏭️ \`$name\` (\`$draft_tag\`): CI/docs only" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
