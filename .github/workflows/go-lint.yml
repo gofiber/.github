@@ -1,81 +1,175 @@
-name: go-lint
+name: Linter
+
+# Reusable, centrally hosted linter workflow for GoFiber repos.
+#
+# Single-module (fiber, utils, cli, schema, boilerplate):
+#   Runs golangci-lint once at the repo root.
+#
+# Multi-module (contrib, storage, template):
+#   On push to main/master or workflow_dispatch: lints ALL modules.
+#   On pull_request: lints only modules whose files changed.
+#   Modules are auto-discovered by locating go.mod files under module-dir.
 
 on:
   workflow_call:
     inputs:
-      go-version:
-        description: Go version to use for linting
-        required: false
-        default: '1.25.x'
+      repo-type:
+        description: 'single | multi'
+        required: true
         type: string
-      working-directory:
-        description: Path to the module to lint
+      module-dir:
+        description: >-
+          Root directory for multi-module discovery (e.g. "v3", ".").
+          Ignored for single-module repos.
         required: false
+        type: string
         default: '.'
-        type: string
-      golangci-version:
-        description: golangci-lint version to install
+      golangci-lint-version:
+        description: 'golangci-lint version to use.'
         required: false
-        default: v2.5.0
         type: string
-      config-path:
-        description: Path to the golangci-lint configuration file
+        default: 'v2.6.2'
+      golangci-lint-args:
+        description: 'Additional args for golangci-lint (e.g. "--tests=false --timeout=5m").'
         required: false
-        default: .github/.golangci.yml
         type: string
-      config-repository:
-        description: Repository that stores the shared golangci-lint configuration
-        required: false
-        default: gofiber/.github
-        type: string
-      config-ref:
-        description: Git ref for the shared golangci-lint configuration
-        required: false
-        default: main
-        type: string
-      use-shared-config:
-        description: Fetch the shared golangci-lint configuration from this repository
-        required: false
-        default: true
-        type: boolean
+        default: ''
 
 permissions:
   contents: read
   pull-requests: read
   checks: write
 
+# ─────────────────────────────────────────────────────────────────────────────
 jobs:
-  golangci-lint:
-    name: golangci-lint
+
+  # ── Single-module lint ───────────────────────────────────────────────────
+  single:
+    if: inputs.repo-type == 'single'
+    name: lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/checkout@v6
 
-      - name: Set up Go
-        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+      - uses: actions/setup-go@v6
         with:
-          go-version: ${{ inputs.go-version }}
+          go-version-file: go.mod
           cache: false
 
-      - name: Fetch shared golangci-lint config
-        if: inputs.use-shared-config == true
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: golangci/golangci-lint-action@v9
         with:
-          repository: ${{ inputs.config-repository }}
-          ref: ${{ inputs.config-ref }}
-          path: _golangci_config
-
-      - name: Copy shared config
-        if: inputs.use-shared-config == true
-        run: |
-          mkdir -p "$(dirname '${{ inputs.config-path }}')"
-          cp "_golangci_config/${{ inputs.config-path }}" "${{ inputs.config-path }}"
-
-      - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@0a35821d5c230e903fcfe077583637dea1b27b47 # v9.0.0
-        with:
-          version: ${{ inputs.golangci-version }}
+          version: ${{ inputs.golangci-lint-version }}
+          args: ${{ inputs.golangci-lint-args }}
           install-mode: goinstall
-          working-directory: ${{ inputs.working-directory }}
-          args: --config=${{ inputs.config-path }}
+
+  # ── Multi-module: detect changed packages ────────────────────────────────
+  changes:
+    if: inputs.repo-type == 'multi'
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.set-packages.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history needed for dorny/paths-filter on PRs.
+          # On push/dispatch this is unnecessary but harmless.
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
+
+      - name: Discover modules
+        id: discover
+        env:
+          MODULE_DIR: ${{ inputs.module-dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Find all go.mod files under MODULE_DIR (skip vendor/testdata)
+          if [ "$MODULE_DIR" = "." ]; then
+            modules=$(find . -name go.mod -not -path ./go.mod \
+              -not -path '*/vendor/*' -not -path '*/testdata/*' \
+              | sed 's|/go.mod||; s|^\./||' | sort)
+          else
+            modules=$(find "$MODULE_DIR" -name go.mod \
+              -not -path '*/vendor/*' -not -path '*/testdata/*' \
+              | sed 's|/go.mod||; s|^\./||' | sort)
+          fi
+
+          if [ -z "$modules" ]; then
+            echo "::warning::No Go modules found under ${MODULE_DIR}"
+            echo "filters=" >> "$GITHUB_OUTPUT"
+            echo "all=[]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Build dorny/paths-filter YAML
+          # _shared catches files at the module-dir root (e.g. .golangci.yml,
+          # go.work) that affect all modules but live outside any single one.
+          {
+            echo "filters<<EOF"
+            for mod in $modules; do
+              echo "${mod}: \"${mod}/**\""
+            done
+            if [ "$MODULE_DIR" = "." ]; then
+              echo '_shared: "*"'
+            else
+              echo "_shared: \"${MODULE_DIR}/*\""
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          # Build JSON array of all module paths
+          all=$(printf '%s\n' $modules | jq -Rsc 'split("\n") | map(select(length > 0))')
+          echo "all=${all}" >> "$GITHUB_OUTPUT"
+
+      - name: Filter changes
+        if: github.event_name == 'pull_request'
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: ${{ steps.discover.outputs.filters }}
+
+      - name: Set packages
+        id: set-packages
+        shell: bash
+        run: |
+          # Push / workflow_dispatch → all modules; PR → only changed modules
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            changes='${{ steps.filter.outputs.changes }}'
+            # If shared/root files changed, lint all modules
+            if printf '%s' "$changes" | jq -e 'index("_shared")' > /dev/null 2>&1; then
+              packages='${{ steps.discover.outputs.all }}'
+            else
+              packages="$changes"
+            fi
+          else
+            packages='${{ steps.discover.outputs.all }}'
+          fi
+          [ -z "$packages" ] && packages="[]"
+          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+
+  # ── Multi-module: lint each package ──────────────────────────────────────
+  multi:
+    if: inputs.repo-type == 'multi' && needs.changes.outputs.packages != '[]'
+    name: "lint (${{ matrix.package }})"
+    needs: changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.changes.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: "${{ matrix.package }}/go.mod"
+          cache: false
+
+      - uses: golangci/golangci-lint-action@v9
+        env:
+          GOWORK: 'off'
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          args: ${{ inputs.golangci-lint-args }}
+          working-directory: ${{ matrix.package }}
+          install-mode: goinstall
