@@ -385,6 +385,21 @@ jobs:
             echo "> Filter: \`$DRAFT_TAGS\`" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+          # ── Execution plan ──────────────────────────────────────────
+          draft_count=$(printf '%s' "$all_drafts" | jq 'length')
+          echo ""
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║  Weekly Release — Execution Plan                 ║"
+          echo "╠══════════════════════════════════════════════════╣"
+          echo "║  Drafts found: $draft_count"
+          echo "║  Waves:        $wave_count"
+          echo "║  Module delay: ${DELAY_MINUTES}m"
+          echo "║  Wave delay:   ${WAVE_DELAY_MINUTES:-0}m"
+          echo "║  Dry-run:      $DRY_RUN"
+          echo "╚══════════════════════════════════════════════════╝"
+          printf '%s' "$all_drafts" | jq -r '.[] | "  → \(.tag_name)"'
+          echo ""
+
           # ── Track processed draft tags ─────────────────────────────
           > "$RUNNER_TEMP/processed_tags.txt"
 
@@ -488,6 +503,9 @@ jobs:
             draft_tag=$(printf '%s' "$draft" | jq -r '.tag_name')
             draft_body=$(printf '%s' "$draft" | jq -r '.body // ""')
 
+            echo "::group::📦 $name ($draft_tag)"
+            echo "── Start: $name | Tag: $draft_tag ──"
+
             # Record as processed
             echo "$draft_tag" >> "$RUNNER_TEMP/processed_tags.txt"
 
@@ -501,8 +519,10 @@ jobs:
 
             # Skip empty drafts
             if ! printf '%s' "$draft_body" | grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+'; then
+              echo "⏭️  Skipped: $name ($draft_tag) — no PR entries"
               echo "- ⏭️ \`$name\` (\`$draft_tag\`): no PR entries" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
+              echo "::endgroup::"
               return
             fi
 
@@ -524,6 +544,7 @@ jobs:
             fi
 
             if [ "$is_major" = "true" ] && [ "$SKIP_MAJOR" = "true" ]; then
+              echo "🚧 Major bump detected: $name ($draft_tag) — skipping"
               echo "- 🚧 \`$name\` (\`$draft_tag\`): **major — skipped**" >> "$GITHUB_STEP_SUMMARY"
               local title="Major release pending: ${draft_tag}"
               local existing
@@ -534,6 +555,7 @@ jobs:
                   --label "release-automation" || true
               fi
               ((skipped++)) || true
+              echo "::endgroup::"
               return
             fi
 
@@ -542,12 +564,15 @@ jobs:
             local existing
             existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
             if [ -n "$existing" ]; then
+              echo "⏸️  Pending major issue #${existing} — skipping $name ($draft_tag)"
               echo "- ⏸️ \`$name\` (\`$draft_tag\`): pending-major #${existing}" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
+              echo "::endgroup::"
               return
             fi
 
             # Cleanup
+            echo "🧹 Cleaning release notes..."
             printf '%s' "$draft_body" > "$RUNNER_TEMP/original.md"
             local dedupe_flag="--dedupe=true"
             [ "$DEDUPE" = "false" ] && dedupe_flag="--dedupe=false"
@@ -560,9 +585,11 @@ jobs:
               2> "$RUNNER_TEMP/cleanup.log" || true
 
             # Publish or dry-run
+            echo "📦 Publishing $name ($draft_tag)..."
             echo "- 📦 \`$name\` (\`$draft_tag\`): preparing at $(date -u +%H:%M:%S) UTC..." >> "$GITHUB_STEP_SUMMARY"
 
             if [ "$DRY_RUN" = "true" ]; then
+              echo "🔍 Dry-run: $name ($draft_tag) — no changes made"
               echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
               {
                 echo "<details><summary>Diff for $name</summary>"
@@ -574,17 +601,21 @@ jobs:
               } >> "$GITHUB_STEP_SUMMARY"
               run_hooks "$name" "$draft_tag" "$module_hooks"
               ((published++)) || true
+              echo "::endgroup::"
             else
               local payload
               payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
               if printf '%s' "$payload" | gh api --method PATCH "/repos/${GH_REPO}/releases/${draft_id}" --input - > /dev/null 2>&1; then
+                echo "✅ Published: $name ($draft_tag)"
                 echo "- ✅ \`$name\` (\`$draft_tag\`): **published** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
                 run_hooks "$name" "$draft_tag" "$module_hooks"
                 ((published++)) || true
               else
+                echo "❌ FAILED: $name ($draft_tag)"
                 echo "- ❌ \`$name\` (\`$draft_tag\`): **FAILED** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
                 ((failed++)) || true
               fi
+              echo "::endgroup::"
             fi
           }
 
@@ -593,9 +624,15 @@ jobs:
             wave_name=$(yq ".waves[$wi].name" "$PLAN_PATH")
             auto_discover=$(yq ".waves[$wi].auto-discover // false" "$PLAN_PATH")
 
+            echo ""
+            echo "════════════════════════════════════════════"
+            echo "  Wave $((wi+1))/$wave_count: $wave_name"
+            echo "════════════════════════════════════════════"
+
             # Wave delay (skip before the very first wave)
             if [ "$wi" -gt 0 ] && [ "${WAVE_DELAY_MINUTES:-0}" -gt 0 ] && [ "$DRY_RUN" != "true" ]; then
               echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "⏳ Wave delay: waiting ${WAVE_DELAY_MINUTES}m before wave $((wi+1)) ($wave_name)..."
               echo "⏳ Wave delay: waiting ${WAVE_DELAY_MINUTES}m before wave $((wi+1)) ($wave_name)..." >> "$GITHUB_STEP_SUMMARY"
               sleep "$((WAVE_DELAY_MINUTES * 60))"
             fi
@@ -613,6 +650,7 @@ jobs:
               fi
 
               remaining_count=$(printf '%s' "$remaining" | jq 'length')
+              echo "  Auto-discovered: $remaining_count remaining drafts"
               echo "### Wave $((wi+1)): $wave_name (auto-discover: $remaining_count drafts)" >> "$GITHUB_STEP_SUMMARY"
 
               if [ "$remaining_count" -eq 0 ]; then
@@ -639,6 +677,7 @@ jobs:
 
                 draft=$(find_draft "$tag_prefix")
                 if [ -z "$draft" ]; then
+                  echo "⏭️  No draft for $name (prefix: $tag_prefix)"
                   echo "- ⏭️ \`$name\`: no draft (prefix: \`$tag_prefix\`)" >> "$GITHUB_STEP_SUMMARY"
                   ((skipped++)) || true
                   continue
@@ -650,6 +689,14 @@ jobs:
           done
 
           # ── Final summary ──────────────────────────────────────────
+          echo ""
+          echo "╔══════════════════════════════════════════════════╗"
+          echo "║  Results                                         ║"
+          echo "╠══════════════════════════════════════════════════╣"
+          echo "║  ✅ Published: $published"
+          echo "║  ⏭️  Skipped:   $skipped"
+          echo "║  ❌ Failed:    $failed"
+          echo "╚══════════════════════════════════════════════════╝"
           {
             echo ""
             echo "### Results"
