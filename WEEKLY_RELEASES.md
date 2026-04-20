@@ -6,15 +6,14 @@ Every GoFiber repo has a weekly scheduled workflow that automatically publishes 
 
 ## Schedule
 
-| Day | Repo | Type | Cron (UTC) |
-|-----|------|------|------------|
-| Mon | cli | single | `0 8 * * 1` |
-| Tue | utils | single | `0 8 * * 2` |
-| Wed | template | multi | `0 8 * * 3` |
-| Thu | storage | multi | `0 8 * * 4` |
-| Fri | contrib | multi | `0 8 * * 5` |
-| Sat | schema | single | `0 8 * * 6` |
-| Sun | multi-labeler | single | `0 8 * * 0` |
+| Day | Repo | Type | Cron (UTC) | Reason |
+|-----|------|------|------------|--------|
+| Sun | multi-labeler | single | `0 8 * * 0` | independent tool |
+| Mon | utils | single | `0 8 * * 1` | foundation — no GoFiber deps |
+| Tue | schema, storage | single, multi | `0 8 * * 2` | schema depends on utils; storage is independent |
+| Wed | template | multi | `0 8 * * 3` | depends on utils |
+| Thu | contrib | multi | `0 8 * * 4` | depends on fiber + utils |
+| Fri | cli | single | `0 8 * * 5` | depends on fiber |
 
 08:00 UTC = 10:00 CEST (summer) / 09:00 CET (winter).
 
