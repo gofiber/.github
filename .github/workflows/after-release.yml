@@ -15,6 +15,11 @@ on:
         required: false
         type: number
         default: 5
+      skip-wait:
+        description: 'Skip the registry wait (e.g. manual workflow_dispatch).'
+        required: false
+        type: boolean
+        default: false
     secrets:
       dispatch-token:
         description: 'PAT with contents:write for cross-repo dispatch'
@@ -27,7 +32,7 @@ jobs:
       matrix: ${{ steps.parse.outputs.matrix }}
     steps:
       - name: Wait for registries to index
-        if: inputs.delay-minutes > 0
+        if: inputs.delay-minutes > 0 && !inputs.skip-wait
         run: |
           echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
           sleep $(( ${{ inputs.delay-minutes }} * 60 ))
