@@ -122,13 +122,15 @@ handle_release() {
             stripped="${tag#"${SOURCE_DIR}/"}"
         fi
         local package_name="${stripped%/*}"
-        local version_part="${stripped#*/}"
+        local version_part="${stripped##*/}"
         local major="${version_part%%.*}"
         major="${major#v}"
+        # Replace slashes in package name (e.g. testhelpers/redis → testhelpers_redis)
+        local safe_package="${package_name//\//_}"
         if [[ -n "$SOURCE_DIR" && "$SOURCE_DIR" != "." ]]; then
-            new_version="${SOURCE_DIR}_${package_name}_${major}.x.x"
+            new_version="${SOURCE_DIR}_${safe_package}_${major}.x.x"
         else
-            new_version="${package_name}_${major}.x.x"
+            new_version="${safe_package}_${major}.x.x"
         fi
     fi
 
