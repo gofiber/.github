@@ -79,6 +79,15 @@ on:
         required: false
         type: string
         default: '0'
+      post-release-events:
+        description: >-
+          Comma-separated repository_dispatch event types to fire after a
+          successful single-module publish (e.g. "after-release,sync-docs").
+          Requires the dispatch-token secret. Ignored for multi-module repos
+          (use release-plan.yml post-release hooks instead).
+        required: false
+        type: string
+        default: ''
     secrets:
       dispatch-token:
         description: >-
@@ -157,6 +166,22 @@ jobs:
             tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
             echo "ℹ️ Draft \`${tag}\` has no PR entries — skipped." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Skip if the only changes are CI (GitHub Actions) and/or documentation
+          if ! awk '
+            /^## .*Documentation/{ skip=1; next }
+            /^## .*Maintenance/{ skip=2; next }
+            /^## /{ skip=0 }
+            skip==1{ next }
+            skip==2 && /^- / && /actions\/|\.github\//{ next }
+            /^- .*(#[0-9]+|\/(pull|issues?)\/[0-9]+)/{ found=1; exit }
+            END{ exit !found }
+          ' "$RUNNER_TEMP/draft_body.md"; then
+            tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
+            echo "no-draft=true" >> "$GITHUB_OUTPUT"
+            echo "ℹ️ Draft \`${tag}\` contains only CI/docs changes — skipped." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -272,6 +297,36 @@ jobs:
           publish: ${{ inputs.dry-run && 'false' || 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch post-release events
+        if: >-
+          steps.draft.outputs.no-draft == 'false' &&
+          steps.bump.outputs.is_major != 'true' &&
+          steps.pending.outputs.pending != 'true' &&
+          !inputs.dry-run &&
+          inputs.post-release-events != ''
+        env:
+          DISPATCH_TOKEN: ${{ secrets.dispatch-token || secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          EVENTS: ${{ inputs.post-release-events }}
+          TAG: ${{ steps.draft.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          IFS=',' read -ra events <<< "$EVENTS"
+          for event in "${events[@]}"; do
+            event=$(printf '%s' "$event" | xargs)
+            [ -z "$event" ] && continue
+            payload=$(jq -n --arg tag "$TAG" --arg source "$GH_REPO" \
+              '{tag: $tag, source_repository: $source}')
+            if GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "/repos/${GH_REPO}/dispatches" \
+              -f "event_type=${event}" \
+              --argjson "client_payload" "$payload" 2>/dev/null; then
+              echo "🔔 Dispatched \`$event\` → \`$GH_REPO\`" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "⚠️ Failed to dispatch \`$event\` → \`$GH_REPO\`" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Summary
         if: always() && steps.draft.outputs.no-draft == 'false'
@@ -521,6 +576,23 @@ jobs:
             if ! printf '%s' "$draft_body" | grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+'; then
               echo "⏭️  Skipped: $name ($draft_tag) — no PR entries"
               echo "- ⏭️ \`$name\` (\`$draft_tag\`): no PR entries" >> "$GITHUB_STEP_SUMMARY"
+              ((skipped++)) || true
+              echo "::endgroup::"
+              return
+            fi
+
+            # Skip if the only changes are CI (GitHub Actions) and/or documentation
+            if ! printf '%s' "$draft_body" | awk '
+              /^## .*Documentation/{ skip=1; next }
+              /^## .*Maintenance/{ skip=2; next }
+              /^## /{ skip=0 }
+              skip==1{ next }
+              skip==2 && /^- / && /actions\/|\.github\//{ next }
+              /^- .*(#[0-9]+|\/(pull|issues?)\/[0-9]+)/{ found=1; exit }
+              END{ exit !found }
+            '; then
+              echo "⏭️  Skipped: $name ($draft_tag) — CI/docs changes only"
+              echo "- ⏭️ \`$name\` (\`$draft_tag\`): CI/docs only" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
               echo "::endgroup::"
               return
