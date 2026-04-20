@@ -688,6 +688,24 @@ jobs:
             fi
           done
 
+          # ── Top-level post-release hooks ────────────────────────────
+          if [ "$published" -gt 0 ]; then
+            top_hooks=$(yq -o=json '.post-release // []' "$PLAN_PATH")
+            if [ "$top_hooks" != "[]" ] && [ "$top_hooks" != "null" ]; then
+              echo ""
+              echo "::group::🔔 Post-release hooks"
+              echo "── Running top-level post-release hooks ──"
+              if [ "$DRY_RUN" != "true" ]; then
+                echo "⏳ Waiting 5m for registries to index..."
+                sleep 300
+              fi
+              run_hooks "$(basename "${GH_REPO}")" "batch" "$top_hooks"
+              echo "::endgroup::"
+            fi
+          else
+            echo "ℹ️  No modules published — skipping post-release hooks."
+          fi
+
           # ── Final summary ──────────────────────────────────────────
           echo ""
           echo "╔══════════════════════════════════════════════════╗"
