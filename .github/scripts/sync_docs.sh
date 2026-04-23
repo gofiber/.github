@@ -124,7 +124,6 @@ handle_release() {
         local package_name="${stripped%/*}"
         local version_part="${stripped##*/}"
         local major="${version_part%%.*}"
-        major="${major#v}"
         # Replace slashes in package name (e.g. testhelpers/redis → testhelpers_redis)
         local safe_package="${package_name//\//_}"
         if [[ -n "$SOURCE_DIR" && "$SOURCE_DIR" != "." ]]; then
