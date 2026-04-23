@@ -346,13 +346,15 @@ jobs:
           for event in "${events[@]}"; do
             event=$(printf '%s' "$event" | xargs)
             [ -z "$event" ] && continue
-            payload=$(jq -n --arg tag "$TAG" --arg source "$GH_REPO" \
-              '{tag: $tag, source_repository: $source}')
-            if GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "/repos/${GH_REPO}/dispatches" \
-              -f "event_type=${event}" \
-              --argjson "client_payload" "$payload" 2>/dev/null; then
+            body=$(jq -n --arg event "$event" --arg tag "$TAG" --arg source "$GH_REPO" \
+              '{event_type: $event, client_payload: {tag: $tag, source_repository: $source}}')
+            echo "Dispatching '$event' → '$GH_REPO'..."
+            if printf '%s' "$body" | GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST \
+              "/repos/${GH_REPO}/dispatches" --input - 2>&1; then
+              echo "🔔 Dispatched '$event' → '$GH_REPO'"
               echo "🔔 Dispatched \`$event\` → \`$GH_REPO\`" >> "$GITHUB_STEP_SUMMARY"
             else
+              echo "⚠️ Failed to dispatch '$event' → '$GH_REPO'"
               echo "⚠️ Failed to dispatch \`$event\` → \`$GH_REPO\`" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
@@ -567,6 +569,7 @@ jobs:
 
             local hook_count
             hook_count=$(printf '%s' "$hooks" | jq 'length')
+            echo "  Processing $hook_count hook(s) for $name..."
 
             for hi in $(seq 0 $((hook_count - 1))); do
               local action
@@ -580,28 +583,34 @@ jobs:
                   directory=$(printf '%s' "$hooks" | jq -r ".[$hi].directory // \"/\"")
                   ecosystem=$(printf '%s' "$hooks" | jq -r ".[$hi][\"package-ecosystem\"] // \"gomod\"")
 
-                  local payload
-                  payload=$(jq -n \
+                  local body
+                  body=$(jq -n \
+                    --arg event "$event" \
                     --arg module "$name" \
                     --arg tag "$tag" \
                     --arg source "$GH_REPO" \
                     --arg dir "$directory" \
                     --arg eco "$ecosystem" \
-                    '{module: $module, tag: $tag, source_repository: $source, directory: $dir, package_ecosystem: $eco}')
+                    '{event_type: $event, client_payload: {module: $module, tag: $tag, source_repository: $source, directory: $dir, package_ecosystem: $eco}}')
 
                   if [ "$DRY_RUN" = "true" ]; then
+                    echo "  🔔 (dry-run) Would dispatch '$event' → '$repo'"
                     echo "  - 🔔 (dry-run) Would dispatch \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
                   else
-                    if GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST "/repos/${repo}/dispatches" \
-                      -f "event_type=${event}" \
-                      --argjson "client_payload" "$payload" 2>/dev/null; then
+                    echo "  Dispatching '$event' → '$repo'..."
+                    local api_err=""
+                    if api_err=$(printf '%s' "$body" | GH_TOKEN="$DISPATCH_TOKEN" gh api --method POST \
+                      "/repos/${repo}/dispatches" --input - 2>&1); then
+                      echo "  🔔 Dispatched '$event' → '$repo'"
                       echo "  - 🔔 Dispatched \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
                     else
-                      echo "  - ⚠️ Failed to dispatch \`$event\` → \`$repo\`" >> "$GITHUB_STEP_SUMMARY"
+                      echo "  ⚠️ Failed to dispatch '$event' → '$repo': $api_err"
+                      echo "  - ⚠️ Failed to dispatch \`$event\` → \`$repo\`: $api_err" >> "$GITHUB_STEP_SUMMARY"
                     fi
                   fi
                   ;;
                 *)
+                  echo "  ⚠️ Unknown hook action: '$action'"
                   echo "  - ⚠️ Unknown hook action: \`$action\`" >> "$GITHUB_STEP_SUMMARY"
                   ;;
               esac
@@ -825,6 +834,7 @@ jobs:
               echo ""
               echo "::group::🔔 Post-release hooks"
               echo "── Running top-level post-release hooks ──"
+              echo "  Hooks: $top_hooks"
               if [ "$DRY_RUN" != "true" ]; then
                 echo "⏳ Waiting 5m for registries to index..."
                 sleep 300
