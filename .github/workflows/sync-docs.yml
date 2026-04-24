@@ -56,7 +56,7 @@ on:
       node-version:
         description: 'Node.js version for Docusaurus'
         type: string
-        default: '20'
+        default: '24'
     secrets:
       doc-sync-token:
         description: 'Token with push access to gofiber/docs'

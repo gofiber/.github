@@ -388,18 +388,18 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Checkout caller repo (for release-plan.yml)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           sparse-checkout: ${{ inputs.release-plan-path }}
 
       - name: Checkout central repo (for cleanup tool)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: gofiber/.github
           path: .central
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: .central/.github/actions/clean-release-notes/go.mod
           cache: false
