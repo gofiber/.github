@@ -388,12 +388,12 @@ jobs:
     timeout-minutes: 360
     steps:
       - name: Checkout caller repo (for release-plan.yml)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
         with:
           sparse-checkout: ${{ inputs.release-plan-path }}
 
       - name: Checkout central repo (for cleanup tool)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
         with:
           repository: gofiber/.github
           path: .central
