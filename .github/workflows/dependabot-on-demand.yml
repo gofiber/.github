@@ -30,12 +30,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          MSG="chore(ci): trigger dependabot [skip ci]"
-
-          if [ "$(git log -1 --pretty=%s)" = "$MSG" ]; then
-            git commit -am "$MSG" --amend
-            git push --force-with-lease
-          else
-            git commit -am "$MSG"
-            git push
-          fi
+          git commit -am "chore(ci): trigger dependabot [skip ci]"
+          git push
