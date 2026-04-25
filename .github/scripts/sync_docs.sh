@@ -111,10 +111,10 @@ handle_release() {
     # Compute Docusaurus version identifier
     local new_version
     if [[ "$REPO_TYPE" == "single" ]]; then
-        # fiber: v3.0.0 -> 3.x
+        # fiber: v3.0.0 -> v3.x
         local major="${tag%%.*}"
         major="${major#v}"
-        new_version="${major}.x"
+        new_version="v${major}.x"
     else
         # Multi-module: strip SOURCE_DIR prefix, then parse package/version
         local stripped="$tag"
