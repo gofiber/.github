@@ -14,7 +14,7 @@ on:
         description: 'Minutes to wait for registries to index the new release.'
         required: false
         type: number
-        default: 5
+        default: 10
       skip-wait:
         description: 'Skip the registry wait (e.g. manual workflow_dispatch).'
         required: false
