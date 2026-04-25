@@ -49,7 +49,7 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - uses: actions/setup-go@v6
         with:
@@ -69,7 +69,7 @@ jobs:
     outputs:
       packages: ${{ steps.set-packages.outputs.packages }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
         with:
           # Full history needed for dorny/paths-filter on PRs.
           # On push/dispatch this is unnecessary but harmless.
@@ -158,7 +158,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.changes.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6.0.2
 
       - uses: actions/setup-go@v6
         with:

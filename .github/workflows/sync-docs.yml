@@ -71,12 +71,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout source repo
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 2
 
       - name: Checkout central scripts
-        uses: actions/checkout@v6
+        uses: actions/checkout@v6.0.2
         with:
           repository: gofiber/.github
           path: .central
