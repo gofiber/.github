@@ -1,26 +1,18 @@
-name: Linter
+name: Linter (multi-module)
 
-# Reusable, centrally hosted linter workflow for GoFiber repos.
+# Reusable, centrally hosted linter for multi-module GoFiber repos
+# (contrib, storage, template).
 #
-# Single-module (fiber, utils, cli, schema, boilerplate):
-#   Runs golangci-lint once at the repo root.
-#
-# Multi-module (contrib, storage, template):
-#   On push to main/master or workflow_dispatch: lints ALL modules.
-#   On pull_request: lints only modules whose files changed.
-#   Modules are auto-discovered by locating go.mod files under module-dir.
+# On push to main/master or workflow_dispatch: lints ALL modules.
+# On pull_request: lints only modules whose files changed.
+# Modules are auto-discovered by locating go.mod files under module-dir.
 
 on:
   workflow_call:
     inputs:
-      repo-type:
-        description: 'single | multi'
-        required: true
-        type: string
       module-dir:
         description: >-
           Root directory for multi-module discovery (e.g. "v3", ".").
-          Ignored for single-module repos.
         required: false
         type: string
         default: '.'
@@ -40,31 +32,8 @@ permissions:
   pull-requests: read
   checks: write
 
-# ─────────────────────────────────────────────────────────────────────────────
 jobs:
-
-  # ── Single-module lint ───────────────────────────────────────────────────
-  single:
-    if: inputs.repo-type == 'single'
-    name: lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.2
-
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: false
-
-      - uses: golangci/golangci-lint-action@v9
-        with:
-          version: ${{ inputs.golangci-lint-version }}
-          args: ${{ inputs.golangci-lint-args }}
-          install-mode: goinstall
-
-  # ── Multi-module: detect changed packages ────────────────────────────────
   changes:
-    if: inputs.repo-type == 'multi'
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.set-packages.outputs.packages }}
@@ -147,9 +116,8 @@ jobs:
           [ -z "$packages" ] && packages="[]"
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
 
-  # ── Multi-module: lint each package ──────────────────────────────────────
-  multi:
-    if: inputs.repo-type == 'multi' && needs.changes.outputs.packages != '[]'
+  lint:
+    if: needs.changes.outputs.packages != '[]'
     name: "lint (${{ matrix.package }})"
     needs: changes
     runs-on: ubuntu-latest

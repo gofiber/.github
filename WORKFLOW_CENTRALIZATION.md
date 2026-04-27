@@ -40,7 +40,8 @@ Several workflows appear in multiple repositories and can be centralized in this
 
 The following reusable workflows now live in this repository and can be called from the other gofiber projects:
 
-- `go-lint.yml`: Runs `golangci-lint` with the pinned versions used across gofiber repositories.
+- `go-lint-single.yml`: Runs `golangci-lint` once at the repo root for single-module repos (fiber, utils, cli, schema, boilerplate).
+- `go-lint-multi.yml`: Discovers Go modules, detects changed packages on PRs, and lints each in parallel for multi-module repos (contrib, storage, template).
 - `go-test.yml`: Runs `gotestsum` across a configurable Go/platform matrix and mirrors the coverage uploads used in `gofiber/fiber`.
 - `markdown-check.yml`: Provides Markdown linting via `markdownlint-cli2` with the org-standard globs.
 - `release-drafter.yml`: Central Release Drafter runner with customizable config path and token.

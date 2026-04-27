@@ -1,0 +1,42 @@
+name: Linter (single-module)
+
+# Reusable, centrally hosted linter for single-module GoFiber repos
+# (fiber, utils, cli, schema, boilerplate).
+# Runs golangci-lint once at the repo root.
+
+on:
+  workflow_call:
+    inputs:
+      golangci-lint-version:
+        description: 'golangci-lint version to use.'
+        required: false
+        type: string
+        default: 'v2.6.2'
+      golangci-lint-args:
+        description: 'Additional args for golangci-lint (e.g. "--tests=false --timeout=5m").'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+  checks: write
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: ${{ inputs.golangci-lint-version }}
+          args: ${{ inputs.golangci-lint-args }}
+          install-mode: goinstall
