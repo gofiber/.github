@@ -12,6 +12,9 @@ on:
         description: 'PAT with push access (for protected branches). Falls back to github.token.'
         required: false
 
+permissions:
+  contents: read
+
 jobs:
   trigger:
     runs-on: ubuntu-latest

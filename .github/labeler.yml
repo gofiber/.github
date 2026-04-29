@@ -7,34 +7,34 @@ labels:
   - label: '📒 Documentation'
     matcher:
       # Title matching strategy:
-      # 1) Prefer conventional prefixes first (e.g. "docs:" or "docs(scope):").
-      # 2) Otherwise use free-text keywords, but only before any ":" appears in the title.
-      title: '/^(docs(\([^)]+\))?!?:|[^:]*(docs?|readme|typos?|comments?|documentation))/i'
+      # 1) Conventional prefix (e.g. "docs:", "🔥 docs:") — matched anywhere in the title.
+      # 2) Free-text keywords — only matched before the first ":" (anchored with ^).
+      title: '/(docs(\([^)]+\))?!?:|^[^:]*(docs?|readme|typos?|comments?|documentation))/i'
 
   - label: '☢️ Bug'
     matcher:
-      # Same strategy for all title regexes below: prefix-first, then colon-safe free-text.
-      title: '/^(fix(\([^)]+\))?!?:|[^:]*(bugs?|bugfix(es)?|hotfix|fix(ed|es)?))/i'
+      title: '/(fix(\([^)]+\))?!?:|^[^:]*(bugs?|bugfix(es)?|hotfix|fix(ed|es)?))/i'
 
   - label: '🧹 Updates'
     matcher:
-      title: '/^(?!.*deps)((chore|refactor|perf|test|build|ci|style)(\([^)]+\))?!?:|[^:]*(improve(ments?|d|s|ing)?|missing|updates?|refactor(s|ed|ing)?|deprecated|remove(d|s)?|unused|tests?))/i'
+      # Uses ^(?!.*deps) to exclude titles containing "deps" — requires .*? for the prefix part.
+      title: '/^(?!.*deps)(.*?(chore|refactor|perf|test|build|ci|style)(\([^)]+\))?!?:|[^:]*(improve(ments?|d|s|ing)?|missing|updates?|refactor(s|ed|ing)?|deprecated|remove(d|s)?|unused|tests?))/i'
 
   - label: '🤖 Dependencies'
     matcher:
-      title: '/^((deps(\([^)]+\))?|chore\(deps[^)]*\))!?:|[^:]*(deps?|dependencies|bump|upgrades?))/i'
+      title: '/(deps(\([^)]+\))?!?:|chore\(deps[^)]*\)!?:|^[^:]*(deps?|dependencies|bump|upgrades?))/i'
       files:
         - 'go.sum'
         - '**/go.sum'
 
   - label: '✏️ Feature'
     matcher:
-      title: '/^(feat(\([^)]+\))?!?:|[^:]*(features?|create(d|s)?|implement(s|ed|ing|ations?)?|add(ed|s|ing)?|support(s|ed|ing)?))/i'
+      title: '/(feat(\([^)]+\))?!?:|^[^:]*(features?|create(d|s)?|implement(s|ed|ing|ations?)?|add(ed|s|ing)?|support(s|ed|ing)?))/i'
 
   - label: '📝 Proposal'
     matcher:
-      title: '/^(proposal(\([^)]+\))?!?:|[^:]*(proposals?|ideas?|requests?|suggest(ion|ions|ed)?))/i'
+      title: '/(proposal(\([^)]+\))?!?:|^[^:]*(proposals?|ideas?|requests?|suggest(ion|ions|ed)?))/i'
 
   - label: '🤔 Question'
     matcher:
-      title: '/^(question(\([^)]+\))?!?:|[^:]*(questions?|how|why|what|\?))/i'
+      title: '/(question(\([^)]+\))?!?:|^[^:]*(questions?|how|why|what|\?))/i'
