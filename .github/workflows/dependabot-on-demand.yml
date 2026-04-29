@@ -13,13 +13,11 @@ on:
         required: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v6.0.2
         with:
