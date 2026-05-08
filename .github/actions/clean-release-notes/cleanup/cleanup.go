@@ -134,8 +134,11 @@ var headingRe = regexp.MustCompile(`^##\s+`)
 var bulletRe = regexp.MustCompile(`^- `)
 
 // emojiRe strips ONE or more leading emoji/pictograph characters (plus the
-// Variation-Selector-16 and Zero-Width-Joiner that emoji sequences use)
-// followed by whitespace, from the start of a bullet's text.
+// Variation-Selector-16 and Zero-Width-Joiner that emoji sequences use),
+// optionally followed by whitespace, from the start of a bullet's text.
+// The trailing whitespace is optional so that release-drafter input like
+// "- 🔥feat: foo" (emoji glued directly to a conventional-commit prefix)
+// is also normalized.
 //
 // The ranges cover:
 //
@@ -148,7 +151,7 @@ var bulletRe = regexp.MustCompile(`^- `)
 //	U+FE0F           Variation Selector-16 (the "use emoji presentation" marker)
 //	U+200D           Zero Width Joiner (used in compound emoji)
 var emojiRe = regexp.MustCompile(
-	`^([\x{2300}-\x{23FF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{1F300}-\x{1FAFF}\x{FE0F}\x{200D}]+\s+)`,
+	`^([\x{2300}-\x{23FF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{1F300}-\x{1FAFF}\x{FE0F}\x{200D}]+\s*)`,
 )
 
 // convCommitRe matches a conventional-commit prefix at the start of a

@@ -44,6 +44,16 @@ func TestStripBulletEmoji(t *testing.T) {
 			in:   "## Fixes\n🐛 not a bullet\n- 🐛 is a bullet (#1)\n",
 			want: "## Fixes\n🐛 not a bullet\n- is a bullet (#1)\n",
 		},
+		{
+			name: "emoji glued to text without whitespace",
+			in:   "## New\n- 🔥feat: add storage backed SharedState (#4243)\n",
+			want: "## New\n- feat: add storage backed SharedState (#4243)\n",
+		},
+		{
+			name: "multi-emoji glued to text",
+			in:   "## New\n- 🔥💥breaking change (#1)\n",
+			want: "## New\n- breaking change (#1)\n",
+		},
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -95,6 +105,11 @@ func TestStripConvCommitPrefix(t *testing.T) {
 			name: "applies after emoji strip",
 			in:   "## Fixes\n- 🐛 fix: combined (#6)\n",
 			want: "## Fixes\n- combined (#6)\n",
+		},
+		{
+			name: "applies after emoji strip with no whitespace between",
+			in:   "## New\n- 🔥feat: glued emoji prefix (#7)\n",
+			want: "## New\n- glued emoji prefix (#7)\n",
 		},
 	}
 	for _, tc := range cases {
