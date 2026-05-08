@@ -1,0 +1,63 @@
+name: test-actions
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/go-test.yml'
+      - '.github/workflows/test-actions.yml'
+  pull_request:
+    paths:
+      - '.github/actions/**'
+      - '.github/workflows/go-test.yml'
+      - '.github/workflows/test-actions.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      go-modules: ${{ steps.go.outputs.modules }}
+      has-go: ${{ steps.go.outputs.has-modules }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Discover Go modules with tests
+        id: go
+        shell: bash
+        run: |
+          set -euo pipefail
+          json=$(
+            find .github/actions -name go.mod -type f -exec dirname {} \; \
+              | sort -u \
+              | while read -r dir; do
+                  if find "$dir" -name '*_test.go' -print -quit | grep -q .; then
+                    echo "$dir"
+                  fi
+                done \
+              | jq -Rcn '[inputs]'
+          )
+          echo "modules=$json" >> "$GITHUB_OUTPUT"
+          if [ "$json" = "[]" ]; then
+            echo "has-modules=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-modules=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Discovered: $json"
+
+  go:
+    needs: discover
+    if: needs.discover.outputs.has-go == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJson(needs.discover.outputs.go-modules) }}
+    uses: ./.github/workflows/go-test.yml
+    with:
+      working-directory: ${{ matrix.module }}
+      platforms: '["ubuntu-latest"]'
+      enable-codecov: false
+      enable-repeated: false
