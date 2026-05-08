@@ -5,12 +5,10 @@ on:
     branches: [main]
     paths:
       - '.github/actions/**'
-      - '.github/workflows/go-test.yml'
       - '.github/workflows/test-actions.yml'
   pull_request:
     paths:
       - '.github/actions/**'
-      - '.github/workflows/go-test.yml'
       - '.github/workflows/test-actions.yml'
 
 permissions:
@@ -51,13 +49,19 @@ jobs:
   go:
     needs: discover
     if: needs.discover.outputs.has-go == 'true'
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         module: ${{ fromJson(needs.discover.outputs.go-modules) }}
-    uses: ./.github/workflows/go-test.yml
-    with:
-      working-directory: ${{ matrix.module }}
-      platforms: '["ubuntu-latest"]'
-      enable-codecov: false
-      enable-repeated: false
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: stable
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+
+      - name: Test ${{ matrix.module }}
+        working-directory: ${{ matrix.module }}
+        run: go test ./... -race -count=1 -shuffle=on
