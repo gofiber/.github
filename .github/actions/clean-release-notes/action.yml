@@ -49,7 +49,7 @@ runs:
     # The Go source lives next to this action.yml, so ${{ github.action_path }}
     # already points at everything we need. No separate checkout required.
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
       with:
         # The go.mod shipped with the action pins the required Go version.
         go-version-file: ${{ github.action_path }}/go.mod

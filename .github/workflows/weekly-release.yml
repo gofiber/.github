@@ -317,7 +317,7 @@ jobs:
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major != 'true' &&
           steps.pending.outputs.pending != 'true'
-        uses: gofiber/.github/.github/actions/clean-release-notes@main
+        uses: gofiber/.github/.github/actions/clean-release-notes@2a2c623de2cfdc4c6b52ecf52907be260a01949b # main
         with:
           release-id: ${{ steps.draft.outputs.id }}
           bots: ${{ inputs.bot-logins }}

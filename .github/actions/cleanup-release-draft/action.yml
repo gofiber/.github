@@ -44,7 +44,7 @@ runs:
 
     - name: Clean release notes
       if: steps.draft.outputs.found == 'true'
-      uses: gofiber/.github/.github/actions/clean-release-notes@main
+      uses: gofiber/.github/.github/actions/clean-release-notes@2a2c623de2cfdc4c6b52ecf52907be260a01949b # main
       with:
         release-id: ${{ steps.draft.outputs.id }}
       env:
