@@ -231,6 +231,117 @@ func TestDedupeKeepsBulletsWithoutPRRef(t *testing.T) {
 	}
 }
 
+func TestDropEmptySections(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		in        string
+		want      string
+		wantWarns int
+	}{
+		{
+			name: "drop section with only blank lines",
+			in: strings.Join([]string{
+				"## 🆕 New",
+				"",
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+			}, "\n"),
+			want: strings.Join([]string{
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+			}, "\n"),
+			wantWarns: 1,
+		},
+		{
+			name: "drop section with only non-bullet text",
+			in: strings.Join([]string{
+				"## 📚 Documentation",
+				"no items yet",
+				"",
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+			}, "\n"),
+			want: strings.Join([]string{
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+			}, "\n"),
+			wantWarns: 1,
+		},
+		{
+			name: "drop trailing empty section preserves epilogue",
+			in: strings.Join([]string{
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+				"## 🆕 New",
+				"",
+				"**Full Changelog**: https://example.com",
+				"",
+			}, "\n"),
+			want: strings.Join([]string{
+				"## 🐛 Fixes",
+				"- fix it (#1)",
+				"",
+				"**Full Changelog**: https://example.com",
+				"",
+			}, "\n"),
+			wantWarns: 1,
+		},
+		{
+			name: "keep section with at least one bullet",
+			in: strings.Join([]string{
+				"## 🆕 New",
+				"- shiny feature (#2)",
+				"",
+			}, "\n"),
+			want: strings.Join([]string{
+				"## 🆕 New",
+				"- shiny feature (#2)",
+				"",
+			}, "\n"),
+			wantWarns: 0,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := Parse(tc.in)
+			var warns []string
+			b.DropEmptySections(func(s string) { warns = append(warns, s) })
+			got := b.Render()
+			if got != tc.want {
+				t.Errorf("DropEmptySections mismatch\n--- got\n%q\n--- want\n%q", got, tc.want)
+			}
+			if len(warns) != tc.wantWarns {
+				t.Errorf("warning count: got %d (%v), want %d", len(warns), warns, tc.wantWarns)
+			}
+		})
+	}
+}
+
+func TestApplyDropsSectionEmptiedByDedupe(t *testing.T) {
+	t.Parallel()
+	// #1 wins in Fixes, leaving Updates with no bullets at all. Apply must
+	// then drop the now-empty Updates heading.
+	in := strings.Join([]string{
+		"## 🐛 Fixes",
+		"- fix crash (#1)",
+		"",
+		"## 🧹 Updates",
+		"- duplicate of fix (#1)",
+		"",
+	}, "\n")
+	out := Apply(in, Options{Dedupe: true})
+	mustNotContain(t, out, "Updates", "section emptied by dedupe should be dropped")
+	mustContain(t, out, "fix crash (#1)", "surviving bullet should remain")
+}
+
 func TestApplyOrchestrates(t *testing.T) {
 	t.Parallel()
 	in := strings.Join([]string{
@@ -349,6 +460,7 @@ func FuzzStripBulletEmoji(f *testing.F) {
 		b.StripConvCommitPrefix()
 		b.FilterBotContributors([]string{"dependabot[bot]"}, nil)
 		b.Dedupe(nil)
+		b.DropEmptySections(nil)
 		_ = b.Render()
 	})
 }

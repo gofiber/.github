@@ -289,6 +289,48 @@ func (b *Body) StripConvCommitPrefix() {
 	}
 }
 
+// DropEmptySections removes any section whose Lines contain no bullet lines.
+// Run AFTER Dedupe so that sections emptied by deduplication are also removed.
+// A section counts as empty when no line starts with "- ", regardless of how
+// many blank lines or non-bullet text it carries.
+//
+// When a trailing section is dropped, a leading blank line on the epilogue
+// (e.g. release-drafter's blank gap before "**Full Changelog**") is also
+// collapsed against the surviving section's trailing blank to avoid a double
+// blank-line gap in the rendered output.
+func (b *Body) DropEmptySections(warn func(string)) {
+	kept := b.Sections[:0]
+	dropped := false
+	for _, sec := range b.Sections {
+		hasBullet := false
+		for _, ln := range sec.Lines {
+			if bulletRe.MatchString(ln) {
+				hasBullet = true
+				break
+			}
+		}
+		if !hasBullet {
+			if warn != nil {
+				warn(fmt.Sprintf("dropped empty section %q", strings.TrimSpace(sec.Heading)))
+			}
+			dropped = true
+			continue
+		}
+		kept = append(kept, sec)
+	}
+	b.Sections = kept
+
+	if !dropped || len(b.Sections) == 0 || len(b.Epilogue) == 0 {
+		return
+	}
+	last := &b.Sections[len(b.Sections)-1]
+	endsBlank := len(last.Lines) > 0 && strings.TrimSpace(last.Lines[len(last.Lines)-1]) == ""
+	startsBlank := strings.TrimSpace(b.Epilogue[0]) == ""
+	if endsBlank && startsBlank {
+		b.Epilogue = b.Epilogue[1:]
+	}
+}
+
 // FilterBotContributors removes bot mentions from the "Thank you ..." line in
 // the epilogue. If the list is empty after filtering, the whole line is
 // dropped.
@@ -411,6 +453,8 @@ func Apply(body string, opts Options) string {
 	if opts.Dedupe {
 		parsed.Dedupe(warn)
 	}
+
+	parsed.DropEmptySections(warn)
 
 	return parsed.Render()
 }
