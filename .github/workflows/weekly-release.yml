@@ -13,9 +13,25 @@ name: weekly-release
 #   ordered "waves" of modules. Waves run sequentially (wave 2 waits for
 #   wave 1). Modules within a wave run sequentially with a configurable
 #   delay between publishes. Each module is matched to its draft release
-#   via `tag-prefix`. Dependencies (e.g. socketio→websocket in contrib,
-#   engines→core in template) are solved by putting the dependency in an
+#   via `tag-prefix`. Dependencies (e.g. socketio->websocket in contrib,
+#   engines->core in template) are solved by putting the dependency in an
 #   earlier wave.
+#
+# Notable behavior changes:
+#   - Low-priority cooldown: drafts whose only entries are Maintenance
+#     and/or Documentation are held until N weeks (default 3) have
+#     elapsed since the previous release of the same package. Dependabot
+#     github_actions bumps are filtered out so a draft made of only
+#     those never publishes. See inputs low-priority-cooldown-weeks and
+#     low-priority-sections.
+#   - config-ref default changed from 'main' to '' (empty). Empty now
+#     resolves to github.workflow_sha, so the script helpers in
+#     .central/.github/scripts/ are pinned to the same commit as the
+#     reusable workflow being executed. Callers that previously omitted
+#     config-ref used to track main implicitly; they now pin to the
+#     workflow's commit, which is the stronger reproducibility guarantee.
+#     Pass config-ref: main explicitly to keep the old "track main"
+#     behavior.
 
 on:
   workflow_call:
@@ -45,10 +61,14 @@ on:
         type: string
         default: gofiber/.github
       config-ref:
-        description: Informational git ref of the central repo.
+        description: >-
+          Git ref of the central repo to check out for release-gate.sh
+          and the clean-release-notes tool. Empty (default) resolves
+          to github.workflow_sha so the helper code is pinned to the
+          same commit as the reusable workflow being executed.
         required: false
         type: string
-        default: main
+        default: ''
       dry-run:
         description: When true, compute the cleaned body but do not publish.
         required: false
@@ -79,6 +99,34 @@ on:
         required: false
         type: string
         default: '0'
+      low-priority-cooldown-weeks:
+        description: >-
+          Minimum weeks since the previous release of the same package
+          before a draft that only contains low-priority entries (see
+          low-priority-sections) will be published. Drafts with any
+          other entry (features, fixes, updates, breaking, ...) are
+          released regardless. Single-module repos use the repo's latest
+          release as the reference tag; multi-module repos use the
+          latest tag sharing the same prefix (e.g. "websocket/v...").
+        required: false
+        type: string
+        default: '3'
+      low-priority-sections:
+        description: >-
+          Comma-separated keywords matched case-insensitively as a
+          substring against draft section headings to mark them as
+          low-priority. Emoji-prefixed headings such as "## 🧹
+          Maintenance" are recognized. A draft whose only entries are
+          in these sections is gated on low-priority-cooldown-weeks.
+          All other section headings count as high-priority by default,
+          so callers do not need to list them. Independently of this
+          list, bullets in low-priority sections that reference a
+          Dependabot github_actions PR (CI workflow dependency bumps)
+          are filtered out entirely, so a draft made of only those
+          never releases.
+        required: false
+        type: string
+        default: 'Maintenance,Documentation'
       post-release-events:
         description: >-
           Comma-separated repository_dispatch event types to fire after a
@@ -109,22 +157,42 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Checkout central scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ${{ inputs.config-repository }}
+          ref: ${{ inputs.config-ref || github.workflow_sha }}
+          path: .central
+          sparse-checkout: |
+            .github/scripts
+
       - name: Locate draft release(s)
         id: draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           DRAFT_TAGS: ${{ inputs.draft-tags }}
+          COOLDOWN_WEEKS: ${{ inputs.low-priority-cooldown-weeks }}
+          LOW_PRIORITY_SECTIONS: ${{ inputs.low-priority-sections }}
         shell: bash
         run: |
           set -euo pipefail
+          # Sanitize COOLDOWN_WEEKS: accept non-negative integers; treat
+          # empty (e.g. caller passed through an unset dispatch input)
+          # as "use default" without warning.
+          if [ -z "${COOLDOWN_WEEKS:-}" ]; then
+            COOLDOWN_WEEKS=3
+          elif ! [[ "$COOLDOWN_WEEKS" =~ ^[0-9]+$ ]]; then
+            echo "::warning::low-priority-cooldown-weeks is not a non-negative integer ('${COOLDOWN_WEEKS}'); falling back to 3."
+            COOLDOWN_WEEKS=3
+          fi
           releases=$(gh api "/repos/${GH_REPO}/releases" --paginate)
           drafts=$(printf '%s' "$releases" | jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse')
           count=$(printf '%s' "$drafts" | jq 'length')
 
           if [ "$count" -eq 0 ]; then
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ No draft release found — nothing to publish this week." >> "$GITHUB_STEP_SUMMARY"
+            echo "ℹ️ No draft release found; nothing to publish this week." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
@@ -133,7 +201,7 @@ jobs:
             echo ""
             echo "| Tag | Name | Created |"
             echo "|-----|------|---------|"
-            printf '%s' "$drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "—") | \(.created_at[:10]) |"'
+            printf '%s' "$drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "-") | \(.created_at[:10]) |"'
             echo ""
             if [ -z "${DRAFT_TAGS}" ]; then
               echo "> Processing **all** drafts (no filter set)."
@@ -162,56 +230,48 @@ jobs:
           printf '%s' "$drafts" | jq '.[0]' > "$RUNNER_TEMP/draft.json"
           jq -r '.body // ""' "$RUNNER_TEMP/draft.json" > "$RUNNER_TEMP/draft_body.md"
 
-          if ! grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+' "$RUNNER_TEMP/draft_body.md"; then
-            tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
+          tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
+
+          # Source shared classifier / cooldown helpers. Single source
+          # of truth: /.github/scripts/release-gate.sh in the central
+          # repo (checked out at $GITHUB_WORKSPACE/.central). Tests for
+          # these functions live alongside the script.
+          GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
+          if [ ! -f "$GATE" ]; then
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            exit 1
+          fi
+          # shellcheck disable=SC1091
+          source "$GATE"
+
+          classification=$(classify_draft_priority < "$RUNNER_TEMP/draft_body.md")
+
+          if [ "$classification" = "empty" ]; then
             echo "no-draft=true" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ Draft \`${tag}\` has no PR entries — skipped." >> "$GITHUB_STEP_SUMMARY"
+            echo "ℹ️ Draft \`${tag}\` has no actionable entries; skipped." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
-          # has_real_changes: reads a release body from stdin and returns 0
-          # if it contains changes beyond CI (GitHub Actions) and documentation.
-          # Documentation sections are skipped entirely. Maintenance bullets are
-          # checked via the PR branch name — Dependabot uses "github_actions"
-          # in the branch for GitHub Actions updates.
-          has_real_changes() {
-            local section=""
-            while IFS= read -r line; do
-              if [[ "$line" =~ ^##\  ]]; then
-                if [[ "$line" =~ [Dd]ocumentation ]]; then
-                  section="docs"
-                elif [[ "$line" =~ [Mm]aintenance ]]; then
-                  section="maintenance"
-                else
-                  section="other"
-                fi
-                continue
-              fi
-              [[ "$section" == "docs" ]] && continue
-              if [[ "$line" =~ ^-\ .*(#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+) ]]; then
-                if [[ "$section" == "maintenance" ]]; then
-                  local pr_num
-                  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
-                  if [ -n "$pr_num" ]; then
-                    local branch
-                    branch=$(gh pr view "$pr_num" --repo "$GH_REPO" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
-                    if [[ "$branch" == *github_actions* ]]; then
-                      continue
-                    fi
-                  fi
-                fi
-                return 0
-              fi
-            done
-            return 1
-          }
+          if [ "$classification" = "low-only" ]; then
+            prev_tag=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
 
-          # Skip if the only changes are CI (GitHub Actions) and/or documentation
-          if ! has_real_changes < "$RUNNER_TEMP/draft_body.md"; then
-            tag=$(jq -r '.tag_name' "$RUNNER_TEMP/draft.json")
-            echo "no-draft=true" >> "$GITHUB_OUTPUT"
-            echo "ℹ️ Draft \`${tag}\` contains only CI/docs changes — skipped." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            # Major-bump pre-check via release-gate.sh: bypass cooldown
+            # for majors so the next "Determine previous tag and bump
+            # kind" step can route them to the major-gate.
+            is_major_pre=$(detect_major_bump "$prev_tag" "$tag" "$RUNNER_TEMP/draft_body.md" | cut -f1)
+
+            if [ "$is_major_pre" = "true" ]; then
+              echo "ℹ️ Draft \`${tag}\` is low-priority only but appears to be a major bump; bypassing cooldown so the major-gate can handle it." >> "$GITHUB_STEP_SUMMARY"
+            else
+              weeks=$(weeks_since_release "$prev_tag")
+              if [ "$weeks" -lt "$COOLDOWN_WEEKS" ]; then
+                remaining=$(( COOLDOWN_WEEKS - weeks ))
+                echo "no-draft=true" >> "$GITHUB_OUTPUT"
+                echo "⏸️ Draft \`${tag}\` is low-priority only; within ${COOLDOWN_WEEKS}-week cooldown since \`${prev_tag:-<none>}\` (${weeks}w elapsed, ${remaining}w remaining). Skipped." >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+              fi
+              echo "ℹ️ Draft \`${tag}\` is low-priority only but cooldown elapsed (${weeks}w >= ${COOLDOWN_WEEKS}w). Releasing." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
 
           {
@@ -231,35 +291,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
+          if [ ! -f "$GATE" ]; then
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            exit 1
+          fi
+          # shellcheck disable=SC1091
+          source "$GATE"
+
           prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
           echo "prev_tag=${prev}" >> "$GITHUB_OUTPUT"
 
-          is_major=false
-          reason=""
-          if [ -n "$prev" ]; then
-            prev_major=$(printf '%s' "$prev"    | sed -E 's/^v?([0-9]+).*/\1/')
-            next_major=$(printf '%s' "$NEXT_TAG" | sed -E 's/^v?([0-9]+).*/\1/')
-            if [ "$next_major" -gt "$prev_major" ] 2>/dev/null; then
-              is_major=true
-              reason="major segment bumped: ${prev} → ${NEXT_TAG}"
-            fi
-          fi
-
-          if [ "$is_major" = "false" ]; then
-            awk '/^## .*[Bb]reaking/{f=1;next}/^## /{f=0}f&&/^- /{print;exit}' \
-              "$RUNNER_TEMP/draft_body.md" > "$RUNNER_TEMP/breaking.txt"
-            if [ -s "$RUNNER_TEMP/breaking.txt" ]; then
-              is_major=true
-              reason="draft contains a non-empty Breaking Changes section"
-            fi
-          fi
+          dmb_result=$(detect_major_bump "$prev" "$NEXT_TAG" "$RUNNER_TEMP/draft_body.md")
+          is_major=$(printf '%s' "$dmb_result" | cut -f1)
+          reason=$(printf '%s' "$dmb_result" | cut -f2-)
 
           echo "is_major=${is_major}" >> "$GITHUB_OUTPUT"
           echo "reason=${reason}"    >> "$GITHUB_OUTPUT"
           echo "prev: ${prev:-<none>} | next: ${NEXT_TAG} | is_major=${is_major} (${reason:-no breaking signal})" \
             >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Major gate — upsert tracking issue and skip
+      - name: Major gate - upsert tracking issue and skip
         if: >-
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major == 'true' &&
@@ -307,7 +359,7 @@ jobs:
           existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
           if [ -n "$existing" ]; then
             echo "pending=true" >> "$GITHUB_OUTPUT"
-            echo "⏸️ Skipping — tracking issue #${existing} is still open for ${NEXT_TAG}." >> "$GITHUB_STEP_SUMMARY"
+            echo "⏸️ Skipping; tracking issue #${existing} is still open for ${NEXT_TAG}." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "pending=false" >> "$GITHUB_OUTPUT"
           fi
@@ -371,8 +423,8 @@ jobs:
           set -eu
           case "${IS_MAJOR}/${PENDING}/${DRY_RUN}" in
             true/*/*)   echo "outcome: major-skip (${NEXT_TAG})" ;;
-            */true/*)   echo "outcome: pending-major-open — skipped (${NEXT_TAG})" ;;
-            */*/true)   echo "outcome: dry-run (${NEXT_TAG}) — no API write" ;;
+            */true/*)   echo "outcome: pending-major-open, skipped (${NEXT_TAG})" ;;
+            */*/true)   echo "outcome: dry-run (${NEXT_TAG}), no API write" ;;
             *)          echo "outcome: published (${NEXT_TAG})" ;;
           esac
 
@@ -380,7 +432,7 @@ jobs:
   #
   # Reads release-plan.yml for explicit dependency waves, then auto-discovers
   # any remaining drafts that weren't listed and releases them in a final
-  # "auto" wave. This means new packages are picked up automatically — the
+  # "auto" wave. This means new packages are picked up automatically; the
   # manifest only needs entries for modules with ordering constraints.
   multi-release:
     if: inputs.repo-type == 'multi'
@@ -392,10 +444,11 @@ jobs:
         with:
           sparse-checkout: ${{ inputs.release-plan-path }}
 
-      - name: Checkout central repo (for cleanup tool)
+      - name: Checkout central repo (cleanup tool + release-gate.sh)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          repository: gofiber/.github
+          repository: ${{ inputs.config-repository }}
+          ref: ${{ inputs.config-ref || github.workflow_sha }}
           path: .central
 
       - name: Setup Go
@@ -424,10 +477,22 @@ jobs:
           DEDUPE: ${{ inputs.dedupe }}
           DELAY_MINUTES: ${{ inputs.publish-delay-minutes }}
           WAVE_DELAY_MINUTES: ${{ inputs.wave-delay-minutes }}
+          COOLDOWN_WEEKS: ${{ inputs.low-priority-cooldown-weeks }}
+          LOW_PRIORITY_SECTIONS: ${{ inputs.low-priority-sections }}
           PLAN_PATH: ${{ inputs.release-plan-path }}
         shell: bash
         run: |
           set -euo pipefail
+
+          # Sanitize COOLDOWN_WEEKS: accept non-negative integers; treat
+          # empty (e.g. caller passed through an unset dispatch input)
+          # as "use default" without warning.
+          if [ -z "${COOLDOWN_WEEKS:-}" ]; then
+            COOLDOWN_WEEKS=3
+          elif ! [[ "$COOLDOWN_WEEKS" =~ ^[0-9]+$ ]]; then
+            echo "::warning::low-priority-cooldown-weeks is not a non-negative integer ('${COOLDOWN_WEEKS}'); falling back to 3."
+            COOLDOWN_WEEKS=3
+          fi
 
           # ── Read manifest ──────────────────────────────────────────
           if [ ! -f "$PLAN_PATH" ]; then
@@ -458,7 +523,7 @@ jobs:
             echo ""
             echo "| Tag | Name | Created |"
             echo "|-----|------|---------|"
-            printf '%s' "$all_drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "—") | \(.created_at[:10]) |"'
+            printf '%s' "$all_drafts" | jq -r '.[] | "| `\(.tag_name)` | \(.name // "-") | \(.created_at[:10]) |"'
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -475,7 +540,7 @@ jobs:
           draft_count=$(printf '%s' "$all_drafts" | jq 'length')
           echo ""
           echo "╔══════════════════════════════════════════════════╗"
-          echo "║  Weekly Release — Execution Plan                 ║"
+          echo "║  Weekly Release: Execution Plan                  ║"
           echo "╠══════════════════════════════════════════════════╣"
           echo "║  Drafts found: $draft_count"
           echo "║  Waves:        $wave_count"
@@ -520,42 +585,17 @@ jobs:
             find_prev "$prefix"
           }
 
-          # ── has_real_changes: checks if a draft body has changes ───
-          # beyond CI (GitHub Actions) and documentation. Reads from stdin.
-          # Documentation sections are skipped entirely. Maintenance bullets
-          # are checked via the PR branch name — Dependabot uses
-          # "github_actions" in the branch for GitHub Actions updates.
-          has_real_changes() {
-            local section=""
-            while IFS= read -r line; do
-              if [[ "$line" =~ ^##\  ]]; then
-                if [[ "$line" =~ [Dd]ocumentation ]]; then
-                  section="docs"
-                elif [[ "$line" =~ [Mm]aintenance ]]; then
-                  section="maintenance"
-                else
-                  section="other"
-                fi
-                continue
-              fi
-              [[ "$section" == "docs" ]] && continue
-              if [[ "$line" =~ ^-\ .*(#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+) ]]; then
-                if [[ "$section" == "maintenance" ]]; then
-                  local pr_num
-                  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
-                  if [ -n "$pr_num" ]; then
-                    local branch
-                    branch=$(gh pr view "$pr_num" --repo "$GH_REPO" --json headRefName --jq '.headRefName' 2>/dev/null || echo "")
-                    if [[ "$branch" == *github_actions* ]]; then
-                      continue
-                    fi
-                  fi
-                fi
-                return 0
-              fi
-            done
-            return 1
-          }
+          # Source shared classifier / cooldown helpers. Single source
+          # of truth: /.github/scripts/release-gate.sh in the central
+          # repo (checked out at $GITHUB_WORKSPACE/.central). Tests for
+          # these functions live alongside the script.
+          GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
+          if [ ! -f "$GATE" ]; then
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            exit 1
+          fi
+          # shellcheck disable=SC1091
+          source "$GATE"
 
           # ── run_hooks: execute post-release hooks for a module ────
           run_hooks() {
@@ -649,42 +689,27 @@ jobs:
 
             # Skip empty drafts
             if ! printf '%s' "$draft_body" | grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+'; then
-              echo "⏭️  Skipped: $name ($draft_tag) — no PR entries"
+              echo "⏭️  Skipped: $name ($draft_tag), no PR entries"
               echo "- ⏭️ \`$name\` (\`$draft_tag\`): no PR entries" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
               echo "::endgroup::"
               return
             fi
 
-            # Skip if the only changes are CI (GitHub Actions) and/or documentation
-            if ! printf '%s' "$draft_body" | has_real_changes; then
-              echo "⏭️  Skipped: $name ($draft_tag) — CI/docs changes only"
-              echo "- ⏭️ \`$name\` (\`$draft_tag\`): CI/docs only" >> "$GITHUB_STEP_SUMMARY"
-              ((skipped++)) || true
-              echo "::endgroup::"
-              return
-            fi
-
-            # Major detection
-            local prev_tag is_major=false
+            # Major detection via release-gate.sh (runs before cooldown
+            # so major bumps still reach the major-gate even when the
+            # draft body would otherwise classify as low-only).
+            local prev_tag is_major
             prev_tag=$(find_prev_for_tag "$draft_tag")
-            if [ -n "$prev_tag" ]; then
-              local prev_v next_v
-              prev_v=$(printf '%s' "$prev_tag" | sed -E 's/.*v([0-9]+)\..*/\1/')
-              next_v=$(printf '%s' "$draft_tag" | sed -E 's/.*v([0-9]+)\..*/\1/')
-              if [ "$next_v" -gt "$prev_v" ] 2>/dev/null; then
-                is_major=true
-              fi
-            fi
-            if [ "$is_major" = "false" ]; then
-              if printf '%s' "$draft_body" | awk '/^## .*[Bb]reaking/{f=1;next}/^## /{f=0}f&&/^- /{print;exit}' | grep -q .; then
-                is_major=true
-              fi
-            fi
+            local body_tmp
+            body_tmp=$(mktemp "${RUNNER_TEMP:-/tmp}/body.XXXXXX")
+            printf '%s' "$draft_body" > "$body_tmp"
+            is_major=$(detect_major_bump "$prev_tag" "$draft_tag" "$body_tmp" | cut -f1)
+            rm -f "$body_tmp"
 
             if [ "$is_major" = "true" ] && [ "$SKIP_MAJOR" = "true" ]; then
-              echo "🚧 Major bump detected: $name ($draft_tag) — skipping"
-              echo "- 🚧 \`$name\` (\`$draft_tag\`): **major — skipped**" >> "$GITHUB_STEP_SUMMARY"
+              echo "🚧 Major bump detected: $name ($draft_tag), skipping"
+              echo "- 🚧 \`$name\` (\`$draft_tag\`): **major, skipped**" >> "$GITHUB_STEP_SUMMARY"
               local title="Major release pending: ${draft_tag}"
               local existing
               existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
@@ -703,11 +728,43 @@ jobs:
             local existing
             existing=$(gh issue list --search "in:title \"${title}\"" --state open --json number --jq '.[0].number // ""')
             if [ -n "$existing" ]; then
-              echo "⏸️  Pending major issue #${existing} — skipping $name ($draft_tag)"
+              echo "⏸️  Pending major issue #${existing}, skipping $name ($draft_tag)"
               echo "- ⏸️ \`$name\` (\`$draft_tag\`): pending-major #${existing}" >> "$GITHUB_STEP_SUMMARY"
               ((skipped++)) || true
               echo "::endgroup::"
               return
+            fi
+
+            # Gate low-priority drafts on per-package cooldown. Drafts
+            # whose only entries fall under the configured low-priority
+            # sections (default Maintenance/Documentation) are held
+            # until enough weeks have elapsed since the previous
+            # release of the same package. Reuses prev_tag from major
+            # detection. Drafts with any other entry are released
+            # regardless. Major bumps are handled above and never reach
+            # this block.
+            local classification
+            classification=$(printf '%s' "$draft_body" | classify_draft_priority)
+            if [ "$classification" = "empty" ]; then
+              echo "⏭️  Skipped: $name ($draft_tag), no actionable entries"
+              echo "- ⏭️ \`$name\` (\`$draft_tag\`): no actionable entries" >> "$GITHUB_STEP_SUMMARY"
+              ((skipped++)) || true
+              echo "::endgroup::"
+              return
+            fi
+            if [ "$classification" = "low-only" ]; then
+              local cd_weeks
+              cd_weeks=$(weeks_since_release "$prev_tag")
+              if [ "$cd_weeks" -lt "$COOLDOWN_WEEKS" ]; then
+                local cd_remaining=$(( COOLDOWN_WEEKS - cd_weeks ))
+                echo "⏸️  Cooldown: $name ($draft_tag), low-priority only, ${cd_weeks}w < ${COOLDOWN_WEEKS}w since ${prev_tag:-<none>} (${cd_remaining}w remaining)"
+                echo "- ⏸️ \`$name\` (\`$draft_tag\`): cooldown ${cd_weeks}w/${COOLDOWN_WEEKS}w since \`${prev_tag:-<none>}\` (${cd_remaining}w remaining)" >> "$GITHUB_STEP_SUMMARY"
+                ((skipped++)) || true
+                echo "::endgroup::"
+                return
+              fi
+              echo "ℹ️ $name ($draft_tag) is low-priority only but cooldown elapsed (${cd_weeks}w >= ${COOLDOWN_WEEKS}w). Releasing."
+              echo "- ℹ️ \`$name\` (\`$draft_tag\`): low-only cooldown elapsed (${cd_weeks}w)" >> "$GITHUB_STEP_SUMMARY"
             fi
 
             # Cleanup
@@ -728,7 +785,7 @@ jobs:
             echo "- 📦 \`$name\` (\`$draft_tag\`): preparing at $(date -u +%H:%M:%S) UTC..." >> "$GITHUB_STEP_SUMMARY"
 
             if [ "$DRY_RUN" = "true" ]; then
-              echo "🔍 Dry-run: $name ($draft_tag) — no changes made"
+              echo "🔍 Dry-run: $name ($draft_tag), no changes made"
               echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
               {
                 echo "<details><summary>Diff for $name</summary>"
@@ -843,7 +900,7 @@ jobs:
               echo "::endgroup::"
             fi
           else
-            echo "ℹ️  No modules published — skipping post-release hooks."
+            echo "ℹ️  No modules published; skipping post-release hooks."
           fi
 
           # ── Final summary ──────────────────────────────────────────

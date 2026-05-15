@@ -1,0 +1,26 @@
+name: Test release-gate
+
+on:
+  pull_request:
+    paths:
+      - .github/scripts/release-gate.sh
+      - .github/scripts/test/**
+      - .github/workflows/test-release-gate.yml
+      - .github/workflows/weekly-release.yml
+  push:
+    branches: [main]
+    paths:
+      - .github/scripts/release-gate.sh
+      - .github/scripts/test/**
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Run release-gate tests
+        run: bash .github/scripts/test/test-release-gate.sh
