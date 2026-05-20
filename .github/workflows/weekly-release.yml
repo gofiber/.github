@@ -24,14 +24,10 @@ name: weekly-release
 #     github_actions bumps are filtered out so a draft made of only
 #     those never publishes. See inputs low-priority-cooldown-weeks and
 #     low-priority-sections.
-#   - config-ref default changed from 'main' to '' (empty). Empty now
-#     resolves to github.workflow_sha, so the script helpers in
-#     .central/.github/scripts/ are pinned to the same commit as the
-#     reusable workflow being executed. Callers that previously omitted
-#     config-ref used to track main implicitly; they now pin to the
-#     workflow's commit, which is the stronger reproducibility guarantee.
-#     Pass config-ref: main explicitly to keep the old "track main"
-#     behavior.
+#   - config-ref default is '' (empty). Empty resolves to 'main', so
+#     the script helpers in .central/.github/scripts/ track the latest
+#     central main. Pass an explicit config-ref (branch, tag, or SHA)
+#     to pin to a specific revision of the central repo.
 
 on:
   workflow_call:
@@ -64,8 +60,7 @@ on:
         description: >-
           Git ref of the central repo to check out for release-gate.sh
           and the clean-release-notes tool. Empty (default) resolves
-          to github.workflow_sha so the helper code is pinned to the
-          same commit as the reusable workflow being executed.
+          to 'main'. Pass an explicit branch, tag, or SHA to pin.
         required: false
         type: string
         default: ''
@@ -161,7 +156,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.config-repository }}
-          ref: ${{ inputs.config-ref || github.workflow_sha }}
+          ref: ${{ inputs.config-ref || 'main' }}
           path: .central
           sparse-checkout: |
             .github/scripts
@@ -238,7 +233,7 @@ jobs:
           # these functions live alongside the script.
           GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
           if [ ! -f "$GATE" ]; then
-            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
           # shellcheck disable=SC1091
@@ -293,7 +288,7 @@ jobs:
           set -euo pipefail
           GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
           if [ ! -f "$GATE" ]; then
-            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
           # shellcheck disable=SC1091
@@ -448,7 +443,7 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.config-repository }}
-          ref: ${{ inputs.config-ref || github.workflow_sha }}
+          ref: ${{ inputs.config-ref || 'main' }}
           path: .central
 
       - name: Setup Go
@@ -591,7 +586,7 @@ jobs:
           # these functions live alongside the script.
           GATE="$GITHUB_WORKSPACE/.central/.github/scripts/release-gate.sh"
           if [ ! -f "$GATE" ]; then
-            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || github.workflow_sha }}') did not produce the scripts directory."
+            echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
           # shellcheck disable=SC1091
