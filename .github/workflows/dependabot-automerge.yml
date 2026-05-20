@@ -1,4 +1,4 @@
-name: dependabot-automerge
+name: Dependabot auto-merge
 
 on:
   workflow_dispatch:
@@ -14,19 +14,34 @@ permissions:
   pull-requests: write
 
 jobs:
-  automerge:
+  wait_for_checks:
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    if: ${{ github.actor == 'dependabot[bot]' }}
     steps:
-      - name: Fetch metadata
+      - name: Wait for check is finished
+        id: wait_for_checks
+        uses: poseidon/wait-for-status-checks@899c768d191b56eef585c18f8558da19e1f3e707 # v0.6.0
+        with:
+          token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
+          match_pattern: CodeQL
+          interval: 10
+          timeout: 600
+  dependabot:
+    needs: [wait_for_checks]
+    name: Dependabot auto-merge
+    runs-on: ubuntu-latest
+    if: ${{ github.actor == 'dependabot[bot]' }}
+    steps:
+      - name: Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
-
-      - name: Enable auto-merge
-        if: steps.metadata.outputs.package-ecosystem == 'github-actions'
+      - name: Enable auto-merge for Dependabot PRs
+        if: ${{steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'}}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --merge "$PR_URL"
         env:
+          PR_URL: ${{github.event.pull_request.html_url}}
           GITHUB_TOKEN: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
-          PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr merge --auto --merge "$PR_URL"
