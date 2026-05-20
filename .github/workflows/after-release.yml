@@ -55,7 +55,7 @@ jobs:
       matrix:
         repo: ${{ fromJson(needs.wait.outputs.matrix) }}
     steps:
-      - uses: gofiber/.github/.github/actions/trigger-dependabot@2a2c623de2cfdc4c6b52ecf52907be260a01949b # main
+      - uses: gofiber/.github/.github/actions/trigger-dependabot@main
         with:
           repo: ${{ matrix.repo }}
           token: ${{ secrets.dispatch-token }}
