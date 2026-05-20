@@ -1,6 +1,7 @@
 name: Test release-gate
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - .github/scripts/release-gate.sh
@@ -9,9 +10,6 @@ on:
       - .github/workflows/weekly-release.yml
   push:
     branches: [main]
-    paths:
-      - .github/scripts/release-gate.sh
-      - .github/scripts/test/**
 
 permissions:
   contents: read
