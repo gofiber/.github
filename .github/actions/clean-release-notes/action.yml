@@ -70,8 +70,14 @@ runs:
         RELEASE_ID: ${{ inputs.release-id }}
       run: |
         set -euo pipefail
-        # --jq extracts the already-decoded string, so we can write it verbatim.
-        gh api "/repos/${REPO}/releases/${RELEASE_ID}" --jq '.body // ""' > "$RUNNER_TEMP/original.md"
+        # Fetch the full release once: we need .body for cleaning, and .tag_name
+        # so we can echo it back in the PATCH below. Without explicitly resending
+        # tag_name, GitHub regenerates auto-tags like "untagged-<sha>" on every
+        # PATCH of a draft, which breaks downstream tooling that resolves the
+        # draft by tag.
+        gh api "/repos/${REPO}/releases/${RELEASE_ID}" > "$RUNNER_TEMP/release.json"
+        jq -r '.body // ""' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/original.md"
+        jq -r '.tag_name // ""' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/tag_name.txt"
         echo "original-bytes=$(wc -c < "$RUNNER_TEMP/original.md" | tr -d ' ')" >> "$GITHUB_OUTPUT"
 
     - name: Run cleanup
@@ -132,11 +138,18 @@ runs:
         set -euo pipefail
         # Build the JSON payload with jq so markdown content (newlines,
         # backticks, special chars) is correctly escaped. --rawfile reads
-        # the cleaned body verbatim into a jq string variable.
+        # the cleaned body verbatim into a jq string variable. The current
+        # tag_name is echoed back when non-empty so GitHub does not regenerate
+        # auto-tags (e.g. "untagged-<sha>") on the PATCH.
+        tag_name=$(cat "$RUNNER_TEMP/tag_name.txt")
+        base_filter='{body: $body}'
         if [ "${PUBLISH}" = "true" ]; then
-          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
+          base_filter='{body: $body, draft: false}'
+        fi
+        if [ -n "$tag_name" ]; then
+          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" --arg tag "$tag_name" "$base_filter + {tag_name: \$tag}")
         else
-          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body}')
+          payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" "$base_filter")
         fi
         printf '%s' "$payload" | gh api --method PATCH "/repos/${REPO}/releases/${RELEASE_ID}" --input - > /dev/null
         if [ "${PUBLISH}" = "true" ]; then
