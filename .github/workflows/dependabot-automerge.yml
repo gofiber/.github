@@ -4,6 +4,17 @@ on:
   workflow_dispatch:
   pull_request_target:
   workflow_call:
+    inputs:
+      match_pattern:
+        description: Regex of status check names to wait for before auto-merging. Only triggered checks are awaited; unmatched/non-triggered ones are skipped.
+        required: false
+        default: 'test|discover|go'
+        type: string
+      wait-delay:
+        description: Seconds to wait before the first poll, giving triggered checks time to register their check runs.
+        required: false
+        default: 60
+        type: number
     secrets:
       github-token:
         description: Token with `pull_requests:write` and `contents:write` permissions
@@ -23,7 +34,8 @@ jobs:
         uses: poseidon/wait-for-status-checks@899c768d191b56eef585c18f8558da19e1f3e707 # v0.6.0
         with:
           token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
-          match_pattern: CodeQL
+          match_pattern: ${{ inputs.match_pattern != '' && inputs.match_pattern || 'test|discover|go' }}
+          delay: ${{ inputs.wait-delay || 60 }}
           interval: 10
           timeout: 600
   dependabot:
