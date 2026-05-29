@@ -1,10 +1,17 @@
 name: Clean release notes
 description: >
-  Fetch the body of an existing GitHub release draft, run it through the
-  GoFiber release-notes-cleanup tool (strip bullet emoji / conventional-commit
-  prefixes, drop bot contributors, optionally dedupe PR references across
-  sections), and write the cleaned body back. When `publish: true` the
-  PATCH request also flips `draft` to `false` in the same atomic call.
+  Standalone / manual helper: fetch the body of an existing GitHub release
+  draft, run it through the GoFiber release-notes-cleanup tool (strip bullet
+  emoji / conventional-commit prefixes, drop bot contributors, optionally
+  dedupe PR references across sections), and write the cleaned body back. When
+  `publish: true` the PATCH request also flips `draft` to `false` in the same
+  atomic call.
+
+  Note: the automated release flow no longer calls this action. Drafts are
+  cleaned in place by the sibling `cleanup-release-draft` action (which builds
+  and reuses this directory's Go binary) right after release-drafter, and
+  weekly-release only publishes. This action is kept for manual one-off
+  clean-and-publish and as the home of the cleanup-tool source.
 
   The caller must supply a token (typically via `env.GH_TOKEN`) that has
   `contents: write` on the target repository.

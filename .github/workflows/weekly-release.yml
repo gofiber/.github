@@ -6,7 +6,9 @@ name: weekly-release
 # permissions: contents:write, pull-requests:read, issues:write.
 #
 # Single-module (cli, utils, schema, multi-labeler):
-#   Locates the newest draft, major-gate, cleanup, atomic publish.
+#   Locates the newest draft, major-gate, publish. Release notes are
+#   already cleaned in place by the per-repo post-drafter cleanup
+#   workflow, so publishing only flips draft:false.
 #
 # Multi-module (contrib, storage, template):
 #   Reads a `release-plan.yml` manifest from the caller repo that defines
@@ -58,29 +60,19 @@ on:
         default: gofiber/.github
       config-ref:
         description: >-
-          Git ref of the central repo to check out for release-gate.sh
-          and the clean-release-notes tool. Empty (default) resolves
-          to 'main'. Pass an explicit branch, tag, or SHA to pin.
+          Git ref of the central repo to check out for release-gate.sh.
+          Empty (default) resolves to 'main'. Pass an explicit branch,
+          tag, or SHA to pin.
         required: false
         type: string
         default: ''
       dry-run:
-        description: When true, compute the cleaned body but do not publish.
+        description: When true, do not publish; only report what would be released.
         required: false
         type: boolean
         default: false
       skip-major:
         description: When true, major-version bumps are left as drafts with a tracking issue.
-        required: false
-        type: boolean
-        default: true
-      bot-logins:
-        description: Extra bot keywords for the contributor filter, comma-separated.
-        required: false
-        type: string
-        default: ''
-      dedupe:
-        description: Drop duplicate PR references across sections.
         required: false
         type: boolean
         default: true
@@ -359,20 +351,27 @@ jobs:
             echo "pending=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Clean and publish release
+      - name: Publish release
         if: >-
           steps.draft.outputs.no-draft == 'false' &&
           steps.bump.outputs.is_major != 'true' &&
-          steps.pending.outputs.pending != 'true'
-        uses: gofiber/.github/.github/actions/clean-release-notes@main
-        with:
-          release-id: ${{ steps.draft.outputs.id }}
-          bots: ${{ inputs.bot-logins }}
-          dedupe: ${{ inputs.dedupe }}
-          dry-run: ${{ inputs.dry-run }}
-          publish: ${{ inputs.dry-run && 'false' || 'true' }}
+          steps.pending.outputs.pending != 'true' &&
+          !inputs.dry-run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ steps.draft.outputs.id }}
+          TAG: ${{ steps.draft.outputs.tag_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Release notes are already cleaned in place by the per-repo
+          # post-drafter cleanup workflow, so publishing only flips
+          # draft:false. tag_name is re-echoed so GitHub does not regenerate
+          # an "untagged-<sha>" tag on the PATCH.
+          jq -n --arg tag "$TAG" '{draft: false, tag_name: $tag}' \
+            | gh api --method PATCH "/repos/${GH_REPO}/releases/${RELEASE_ID}" --input - > /dev/null
+          echo "📦 Published \`${TAG}\`." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dispatch post-release events
         if: >-
@@ -439,26 +438,12 @@ jobs:
         with:
           sparse-checkout: ${{ inputs.release-plan-path }}
 
-      - name: Checkout central repo (cleanup tool + release-gate.sh)
+      - name: Checkout central repo (release-gate.sh)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: ${{ inputs.config-repository }}
           ref: ${{ inputs.config-ref || 'main' }}
           path: .central
-
-      - name: Setup Go
-        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
-        with:
-          go-version-file: .central/.github/actions/clean-release-notes/go.mod
-          cache: false
-
-      - name: Build cleanup tool
-        shell: bash
-        env:
-          GOWORK: 'off'
-        run: |
-          cd .central/.github/actions/clean-release-notes
-          go build -trimpath -o "$RUNNER_TEMP/release-notes-cleanup" ./
 
       - name: Process waves + auto-discover remaining
         env:
@@ -468,8 +453,6 @@ jobs:
           DRAFT_TAGS: ${{ inputs.draft-tags }}
           DRY_RUN: ${{ inputs.dry-run }}
           SKIP_MAJOR: ${{ inputs.skip-major }}
-          BOT_LOGINS: ${{ inputs.bot-logins }}
-          DEDUPE: ${{ inputs.dedupe }}
           DELAY_MINUTES: ${{ inputs.publish-delay-minutes }}
           WAVE_DELAY_MINUTES: ${{ inputs.wave-delay-minutes }}
           COOLDOWN_WEEKS: ${{ inputs.low-priority-cooldown-weeks }}
@@ -762,40 +745,23 @@ jobs:
               echo "- ℹ️ \`$name\` (\`$draft_tag\`): low-only cooldown elapsed (${cd_weeks}w)" >> "$GITHUB_STEP_SUMMARY"
             fi
 
-            # Cleanup
-            echo "🧹 Cleaning release notes..."
-            printf '%s' "$draft_body" > "$RUNNER_TEMP/original.md"
-            local dedupe_flag="--dedupe=true"
-            [ "$DEDUPE" = "false" ] && dedupe_flag="--dedupe=false"
-            local bots_args=()
-            [ -n "$BOT_LOGINS" ] && bots_args=(--bots "$BOT_LOGINS")
-
-            "$RUNNER_TEMP/release-notes-cleanup" "${bots_args[@]}" "$dedupe_flag" \
-              < "$RUNNER_TEMP/original.md" \
-              > "$RUNNER_TEMP/cleaned.md" \
-              2> "$RUNNER_TEMP/cleanup.log" || true
-
-            # Publish or dry-run
+            # Publish (release notes are already cleaned in place by the
+            # per-repo post-drafter cleanup workflow; this only flips
+            # draft:false).
             echo "📦 Publishing $name ($draft_tag)..."
             echo "- 📦 \`$name\` (\`$draft_tag\`): preparing at $(date -u +%H:%M:%S) UTC..." >> "$GITHUB_STEP_SUMMARY"
 
             if [ "$DRY_RUN" = "true" ]; then
-              echo "🔍 Dry-run: $name ($draft_tag), no changes made"
-              echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
-              {
-                echo "<details><summary>Diff for $name</summary>"
-                echo ""
-                echo '```diff'
-                diff -u "$RUNNER_TEMP/original.md" "$RUNNER_TEMP/cleaned.md" || true
-                echo '```'
-                echo "</details>"
-              } >> "$GITHUB_STEP_SUMMARY"
+              echo "🔍 Dry-run: $name ($draft_tag), would publish (no changes made)"
+              echo "- 🔍 \`$name\` (\`$draft_tag\`): **dry-run**, would publish at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"
               run_hooks "$name" "$draft_tag" "$module_hooks"
               ((published++)) || true
               echo "::endgroup::"
             else
               local payload
-              payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body, draft: false}')
+              # Re-echo tag_name so GitHub keeps the draft's tag instead of
+              # regenerating an "untagged-<sha>" tag on the PATCH.
+              payload=$(jq -n --arg tag "$draft_tag" '{draft: false, tag_name: $tag}')
               if printf '%s' "$payload" | gh api --method PATCH "/repos/${GH_REPO}/releases/${draft_id}" --input - > /dev/null 2>&1; then
                 echo "✅ Published: $name ($draft_tag)"
                 echo "- ✅ \`$name\` (\`$draft_tag\`): **published** at $(date -u +%H:%M:%S) UTC" >> "$GITHUB_STEP_SUMMARY"

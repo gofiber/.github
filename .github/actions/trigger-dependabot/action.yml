@@ -13,6 +13,13 @@ inputs:
     description: 'GitHub token. Use a PAT for cross-repo triggers.'
     required: false
     default: ${{ github.token }}
+  source:
+    description: >
+      Repository whose release triggered this update. Forwarded in the
+      dispatch payload so the receiver can name it in the trigger commit
+      message. Defaults to the repository running this action.
+    required: false
+    default: ${{ github.repository }}
 
 runs:
   using: composite
@@ -22,9 +29,11 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.token }}
         TARGET_REPO: ${{ inputs.repo }}
+        SOURCE_REPO: ${{ inputs.source }}
       run: |
         set -euo pipefail
-        echo "🔔 Triggering Dependabot in ${TARGET_REPO}..."
-        gh api --method POST "/repos/${TARGET_REPO}/dispatches" \
-          -f "event_type=trigger-dependabot"
+        echo "🔔 Triggering Dependabot in ${TARGET_REPO} (from ${SOURCE_REPO})..."
+        jq -n --arg src "$SOURCE_REPO" \
+          '{event_type: "trigger-dependabot", client_payload: {source_repository: $src}}' \
+          | gh api --method POST "/repos/${TARGET_REPO}/dispatches" --input -
         echo "✅ Dispatched to ${TARGET_REPO}"

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Every GoFiber repo has a weekly scheduled workflow that automatically publishes draft releases created by `release-drafter`. The process: draft → cleanup (strip emoji, conv-commit prefixes, bot contributors) → publish. One repo per weekday, modules within a repo sequentially with a configurable delay.
+Every GoFiber repo has a weekly scheduled workflow that automatically publishes draft releases created by `release-drafter`. Release notes are cleaned (strip emoji, conv-commit prefixes, bot contributors, dedupe) in place by a separate `cleanup-release-draft.yml` workflow that runs right after `release-drafter`, so drafts are always clean. The weekly workflow then only publishes (flips `draft: false`). One repo per weekday, modules within a repo sequentially with a configurable delay.
 
 ## Schedule
 
@@ -22,10 +22,10 @@ Every GoFiber repo has a weekly scheduled workflow that automatically publishes 
 ### Single-module repos (cli, utils, schema, multi-labeler)
 
 1. The existing `release-drafter.yml` workflow keeps a draft release up-to-date on every push to main/master.
-2. The weekly `weekly-release.yml` finds the newest draft.
-3. Skips if: no draft, draft has no PR entries (`#123` references), or it's a major bump.
-4. Runs the cleanup tool (emoji strip, conv-commit prefix strip, bot filter, dedupe).
-5. Publishes the draft in one atomic API call (body patch + `draft: false`).
+2. `cleanup-release-draft.yml` runs right after release-drafter (via a `workflow_run` trigger) and cleans the draft notes in place (emoji strip, conv-commit prefix strip, bot filter, dedupe).
+3. The weekly `weekly-release.yml` finds the newest draft.
+4. Skips if: no draft, draft has no PR entries (`#123` references), or it's a major bump.
+5. Publishes the draft (flips `draft: false`); the body is already clean from step 2.
 
 ### Multi-module repos (contrib, storage, template)
 
@@ -65,7 +65,7 @@ Every repo has a "Run workflow" button in the Actions tab with these inputs:
 | Input | Description |
 |-------|-------------|
 | `draft-tags` | Comma-separated filter. Supports full tags (`v2.0.3`) and package names (`websocket`, `redis`). Matched as substrings. Empty = all drafts. |
-| `dry-run` | Show cleanup diff without publishing. |
+| `dry-run` | Preview which drafts would be published, without publishing. |
 | `delay` | Minutes between module publishes (multi-module only, default 2). |
 
 ### Examples
@@ -89,7 +89,7 @@ On subsequent weekly runs, the workflow sees the open tracking issue and skips t
 
 ## Release Notes Cleanup Rules
 
-Applied automatically before publishing:
+Cleanup runs in the per-repo `cleanup-release-draft.yml` workflow right after release-drafter updates a draft (and can be run manually via its "Run workflow" button; an empty tag cleans all drafts). It rewrites the draft body in place and never publishes. Rules:
 
 1. **Emoji strip** — removes leading emoji from bullet lines (`- 🐛 fix crash` → `- fix crash`). Category headings keep their emoji.
 2. **Conventional-commit prefix strip** — removes `fix:`, `feat(scope):`, `chore!:` etc. from bullet lines.
@@ -127,7 +127,7 @@ jobs:
       draft-tags: ${{ inputs.draft-tags || '' }}
 ```
 
-Prerequisite: the repo must have a working `release-drafter.yml` workflow that creates draft releases.
+Prerequisites: the repo must have a working `release-drafter.yml` workflow that creates draft releases, and a `cleanup-release-draft.yml` workflow that cleans the draft notes after each drafter run. Copy the latter from any existing repo (e.g. `cli`) and set the `workflow_run.workflows:` filter to the exact `name:` of that repo's release-drafter (e.g. `"Release Drafter"`, or `"Release Drafter (All)"` for multi-module).
 
 ### Multi-module
 
@@ -179,17 +179,20 @@ The default job timeout is 360 min (6h). With 2 min delay: up to 180 modules fit
 ```
 gofiber/.github/                          (central)
 ├── .github/
-│   ├── workflows/weekly-release.yml      (reusable orchestrator)
-│   └── actions/clean-release-notes/      (composite action + Go cleanup tool)
-│       ├── action.yml
-│       ├── go.mod, main.go
-│       └── cleanup/
-│           ├── cleanup.go                (parse, emoji, prefix, bot, dedupe)
-│           └── cleanup_test.go
+│   ├── workflows/weekly-release.yml      (reusable orchestrator — publish only)
+│   ├── actions/clean-release-notes/      (composite action + Go cleanup tool)
+│   │   ├── action.yml
+│   │   ├── go.mod, main.go
+│   │   └── cleanup/
+│   │       ├── cleanup.go                (parse, emoji, prefix, bot, dedupe)
+│   │       └── cleanup_test.go
+│   └── actions/cleanup-release-draft/    (builds the tool, cleans all/one draft in place)
+│       └── action.yml
 
 gofiber/<repo>/                           (per repo)
 ├── .github/
 │   ├── workflows/weekly-release.yml      (thin caller, ~35 lines)
+│   ├── workflows/cleanup-release-draft.yml (post-drafter cleanup via workflow_run)
 │   ├── release-plan.yml                  (multi-module only)
 │   ├── release-drafter.yml               (config, already exists)
 │   └── workflows/release-drafter.yml     (legacy drafter, already exists)

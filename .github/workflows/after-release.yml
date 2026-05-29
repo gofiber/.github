@@ -59,3 +59,7 @@ jobs:
         with:
           repo: ${{ matrix.repo }}
           token: ${{ secrets.dispatch-token }}
+          # In a reusable workflow github.repository is the caller (the
+          # releasing repo); pass it explicitly so the trigger commit in the
+          # target repo names the source of the update.
+          source: ${{ github.repository }}

@@ -1,51 +1,110 @@
 name: Cleanup Release Draft
 description: >
-  Find a draft release by tag and clean the release notes using the
-  clean-release-notes tool (strip emoji prefixes, drop bot contributors,
-  dedupe PR references).
+  Find draft release(s) and clean their notes in place using the
+  release-notes-cleanup tool (strip emoji prefixes, drop bot contributors,
+  dedupe PR references). With an empty tag, cleans ALL draft releases; with a
+  tag, cleans only the matching draft. Cleaning is idempotent and drafts stay
+  drafts — this action never publishes.
 
 inputs:
   tag:
-    description: 'Tag or name of the draft release. Empty = latest draft.'
+    description: 'Tag or name of a specific draft release. Empty = clean all drafts.'
     required: false
     default: ''
+  bots:
+    description: >
+      Extra bot logins to strip from the contributor footer, comma-separated.
+      Merged with the cleanup tool's built-in defaults.
+    required: false
+    default: ''
+  dedupe:
+    description: Drop duplicate PR references that span multiple sections.
+    required: false
+    default: 'true'
 
 runs:
   using: composite
   steps:
-    - name: Find draft release
-      id: draft
+    # The cleanup tool lives in the sibling clean-release-notes action; build
+    # it from there so there is a single source of truth for the binary.
+    - name: Set up Go
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      with:
+        go-version-file: ${{ github.action_path }}/../clean-release-notes/go.mod
+        cache: false
+
+    - name: Build cleanup binary
+      shell: bash
+      working-directory: ${{ github.action_path }}/../clean-release-notes
+      run: |
+        set -euo pipefail
+        go build -trimpath -o "$RUNNER_TEMP/release-notes-cleanup" ./
+
+    - name: Clean draft release notes
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag }}
         REPO: ${{ github.repository }}
+        BOTS: ${{ inputs.bots }}
+        DEDUPE: ${{ inputs.dedupe }}
       run: |
         set -euo pipefail
+
         if [ -n "${TAG}" ]; then
-          release=$(gh api "repos/${REPO}/releases" \
-            --jq ".[] | select(.draft == true and (.tag_name == \"${TAG}\" or .name == \"${TAG}\"))" \
-            2>/dev/null || true)
+          ids=$(gh api "repos/${REPO}/releases" --paginate \
+            --jq ".[] | select(.draft == true and (.tag_name == \$ENV.TAG or .name == \$ENV.TAG)) | .id")
         else
-          release=$(gh api "repos/${REPO}/releases" \
-            --jq '[.[] | select(.draft == true)] | sort_by(.created_at) | reverse | .[0] // empty' \
-            2>/dev/null || true)
+          ids=$(gh api "repos/${REPO}/releases" --paginate \
+            --jq '.[] | select(.draft == true) | .id')
         fi
 
-        if [ -z "$release" ]; then
-          echo "❌ No draft release found${TAG:+ for: ${TAG}}"
-          echo "found=false" >> "$GITHUB_OUTPUT"
+        if [ -z "$ids" ]; then
+          echo "ℹ️ No draft release found${TAG:+ for: ${TAG}}; nothing to clean."
           exit 0
         fi
 
-        echo "found=true" >> "$GITHUB_OUTPUT"
-        echo "id=$(printf '%s' "$release" | jq -r '.id')" >> "$GITHUB_OUTPUT"
-        echo "📦 Found draft: $(printf '%s' "$release" | jq -r '.name // .tag_name')"
+        # Build --dedupe flag explicitly so "false" actually turns it off;
+        # go's flag package treats bare "--dedupe" as true.
+        dedupe_flag="--dedupe=true"
+        [ "${DEDUPE}" = "false" ] && dedupe_flag="--dedupe=false"
+        bots_args=()
+        [ -n "${BOTS}" ] && bots_args=(--bots "${BOTS}")
 
-    - name: Clean release notes
-      if: steps.draft.outputs.found == 'true'
-      uses: gofiber/.github/.github/actions/clean-release-notes@main
-      with:
-        release-id: ${{ steps.draft.outputs.id }}
-      env:
-        GH_TOKEN: ${{ github.token }}
+        cleaned_count=0
+        while IFS= read -r id; do
+          [ -z "$id" ] && continue
+
+          gh api "/repos/${REPO}/releases/${id}" > "$RUNNER_TEMP/release.json"
+          jq -r '.body // ""' "$RUNNER_TEMP/release.json" > "$RUNNER_TEMP/original.md"
+          tag_name=$(jq -r '.tag_name // ""' "$RUNNER_TEMP/release.json")
+          name=$(jq -r '.name // .tag_name // .id' "$RUNNER_TEMP/release.json")
+
+          if ! "$RUNNER_TEMP/release-notes-cleanup" "${bots_args[@]}" "$dedupe_flag" \
+            < "$RUNNER_TEMP/original.md" \
+            > "$RUNNER_TEMP/cleaned.md" \
+            2> "$RUNNER_TEMP/cleanup.log"; then
+            echo "::warning::cleanup tool failed for ${name}; leaving draft unchanged"
+            cat "$RUNNER_TEMP/cleanup.log" >&2 || true
+            continue
+          fi
+
+          if cmp -s "$RUNNER_TEMP/original.md" "$RUNNER_TEMP/cleaned.md"; then
+            echo "✓ ${name}: already clean"
+            continue
+          fi
+
+          # Re-echo tag_name so GitHub does not regenerate an "untagged-<sha>"
+          # tag for the draft on the PATCH. Never sets draft:false — publishing
+          # is the weekly-release / manual job's responsibility.
+          if [ -n "$tag_name" ]; then
+            payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" --arg tag "$tag_name" '{body: $body, tag_name: $tag}')
+          else
+            payload=$(jq -n --rawfile body "$RUNNER_TEMP/cleaned.md" '{body: $body}')
+          fi
+          printf '%s' "$payload" | gh api --method PATCH "/repos/${REPO}/releases/${id}" --input - > /dev/null
+          echo "🧹 ${name}: cleaned"
+          cleaned_count=$((cleaned_count + 1))
+        done <<< "$ids"
+
+        echo "Done. Cleaned ${cleaned_count} draft(s)."

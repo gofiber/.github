@@ -26,6 +26,8 @@ jobs:
           token: ${{ secrets.push-token || github.token }}
 
       - name: Trigger Dependabot
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.source_repository }}
         run: |
           file=".github/dependabot.yml"
           [ -x "$file" ] && chmod -x "$file" || chmod +x "$file"
@@ -33,5 +35,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git commit -am "chore(ci): trigger dependabot [skip ci]"
+          # When triggered by a cross-repo release dispatch, name the source
+          # repo in the commit so it is clear what initiated the update.
+          if [ -n "${SOURCE_REPO:-}" ]; then
+            msg="chore(ci): trigger dependabot after ${SOURCE_REPO} release [skip ci]"
+          else
+            msg="chore(ci): trigger dependabot [skip ci]"
+          fi
+
+          git commit -am "$msg"
           git push
