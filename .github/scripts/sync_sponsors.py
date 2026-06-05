@@ -3,19 +3,17 @@
 
 Reads `SPONSORS_TOKEN`, `ORG`, and `FILE` from the environment, fetches the
 org's configured sponsor tiers and current sponsorships via GraphQL, derives
-each monthly tier's display title from the first markdown heading in its
-description (so changes on github.com/sponsors/<org> propagate
-automatically), and replaces the content between a single pair of markers:
+each tier's display title from the first markdown heading in its
+description, and replaces the content between a single pair of markers:
 
   <!-- sponsors --><!-- sponsors -->
 
-The README only carries the intro paragraph and the marker placeholder.
-The script emits a compact avatar-wall layout: one tier label per row
-followed by inline avatars, sized down as the tier value drops so the
-section stays short. Monthly sponsors are filtered to currently-active
-sponsorships only. One-time donations are split into two buckets
-("$100+" and "Other") to keep them compact while still acknowledging
-the bigger one-time gifts.
+Layout: one HTML table per section, with one row per tier. Each row carries
+the tier label in the first cell and an avatar wall of every sponsor at that
+tier in the second cell. Avatar size shrinks for the lower tiers so the
+section stays compact regardless of sponsor count. Monthly sponsors are
+filtered to currently-active subscriptions; one-time donations are bucketed
+into the same tier set so the labels match what donors see on the platform.
 """
 from __future__ import annotations
 
@@ -25,25 +23,33 @@ import re
 import sys
 import urllib.request
 from html import escape
-from typing import Iterable
 
 ORG = os.environ['ORG']
 TOKEN = os.environ['SPONSORS_TOKEN']
 FILE = os.environ.get('FILE', 'README.md')
 
-# Avatar sizes shrink as we go down the prominence ladder so the section
-# stays compact even with many sponsors at the lower tiers.
-MONTHLY_TIER_SIZES = {  # cents threshold -> px
-    50000: 60,  # >= $500
-    25000: 55,  # >= $250
-    10000: 50,  # >= $100
-    5000:  45,  # >= $50
-    1000:  35,  # >= $10
-    0:     32,  # below $10 (Friend)
+# Avatar sizes per tier value (cents). Bigger tiers render larger; tiers full
+# of sponsors render smaller so a packed row still fits comfortably.
+MONTHLY_TIER_PX = {
+    100000: 60,  # $1000+
+    50000:  55,  # $500+
+    25000:  50,  # $250+
+    10000:  45,  # $100+
+    5000:   40,  # $50+
+    1000:   34,  # $10+
+    500:    32,  # $5+
 }
-ONETIME_HIGH_THRESHOLD_CENTS = 10000  # >= $100 one-time goes in the prominent bucket
-ONETIME_HIGH_PX = 50
-ONETIME_LOW_PX = 30
+# One-time visual prominence is dialled down a bit so the section reads as
+# secondary to the monthly subscribers.
+ONETIME_TIER_PX = {
+    100000: 50,
+    50000:  45,
+    25000:  42,
+    10000:  40,
+    5000:   34,
+    1000:   28,
+    500:    26,
+}
 
 QUERY = """
 query($org: String!) {
@@ -124,53 +130,69 @@ def avatar(login: str, website: str, px: int) -> str:
     )
 
 
-def avatar_wall(sponsors: Iterable[tuple[str, str]], px: int) -> str:
+def avatar_wall(sponsors: list[tuple[str, str]], px: int) -> str:
     return "&nbsp;".join(avatar(login, website, px) for login, website in sponsors)
 
 
-def size_for(cents: int) -> int:
-    for threshold in sorted(MONTHLY_TIER_SIZES, reverse=True):
+def size_for(cents: int, sizing: dict[int, int]) -> int:
+    for threshold in sorted(sizing, reverse=True):
         if cents >= threshold:
-            return MONTHLY_TIER_SIZES[threshold]
-    return MONTHLY_TIER_SIZES[0]
+            return sizing[threshold]
+    return sizing[min(sizing)]
 
 
-def render_tier_line(label: str, sponsors: list[tuple[str, str]], px: int) -> str:
-    if not sponsors:
-        return ""
-    return f"**{label}** &nbsp; {avatar_wall(sponsors, px)}"
+def bucket_for(tiers: list[dict], cents: int) -> dict | None:
+    return next((t for t in tiers if t["cents"] <= cents), None)
 
 
-def render_monthly(tiered_monthly: list[tuple[dict, list[tuple[str, str]]]]) -> str:
-    body_lines = []
-    for tier, sponsors in tiered_monthly:
+def render_table(
+    tiers: list[dict],
+    grouped: dict[int, list[tuple[str, str]]],
+    sizing: dict[int, int],
+    empty_message: str,
+) -> str:
+    rows = []
+    for t in tiers:  # high to low
+        sponsors = grouped.get(t["cents"], [])
         if not sponsors:
             continue
-        body_lines.append(render_tier_line(tier["title"], sponsors, size_for(tier["cents"])))
-    if not body_lines:
-        body = (
-            f"_Be the first monthly sponsor and "
-            f"[support {ORG}](https://github.com/sponsors/{ORG})._"
+        rows.append(
+            "<tr>"
+            f'<td valign="top"><strong>{t["title"]}</strong></td>'
+            f'<td>{avatar_wall(sponsors, size_for(t["cents"], sizing))}</td>'
+            "</tr>"
         )
-    else:
-        body = "\n\n".join(body_lines)
-    return f"### 📅 Monthly Sponsors\n\n{body}"
+    if not rows:
+        rows.append(f'<tr><td colspan="2"><em>{empty_message}</em></td></tr>')
+    body = "\n".join(rows)
+    return (
+        "<table>\n"
+        f"{body}\n"
+        "</table>"
+    )
 
 
-def render_onetime(high: list[tuple[str, str]], low: list[tuple[str, str]]) -> str:
-    body_lines = []
-    if high:
-        body_lines.append(render_tier_line("🚀 $100+", high, ONETIME_HIGH_PX))
-    if low:
-        body_lines.append(render_tier_line("☕ Other", low, ONETIME_LOW_PX))
-    if not body_lines:
-        body = (
-            f"_Thank-you donations welcome at "
-            f"[github.com/sponsors/{ORG}](https://github.com/sponsors/{ORG})._"
-        )
-    else:
-        body = "\n\n".join(body_lines)
-    return f"### 🎁 One-time Sponsors\n\n{body}"
+def collect(nodes: list[dict], tiers: list[dict], want_one_time: bool) -> dict[int, list[tuple[str, str]]]:
+    grouped: dict[int, list[tuple[int, str, str]]] = {t["cents"]: [] for t in tiers}
+    for s in nodes:
+        tier_info = s.get("tier") or {}
+        if bool(tier_info.get("isOneTime")) != want_one_time:
+            continue
+        cents = tier_info.get("monthlyPriceInCents") or 0
+        if cents < tiers[-1]["cents"]:
+            continue
+        target = bucket_for(tiers, cents)
+        if target is None:
+            continue
+        entity = s["sponsorEntity"]
+        login = entity["login"]
+        website = normalize_url(entity.get("websiteUrl"), login)
+        grouped[target["cents"]].append((cents, login, website))
+    # Sort within each bucket by sponsor cents desc, then drop the cents key.
+    return {
+        cents_key: [(login, website) for _, login, website in sorted(rows, key=lambda r: -r[0])]
+        for cents_key, rows in grouped.items()
+    }
 
 
 def main() -> None:
@@ -194,56 +216,28 @@ def main() -> None:
     if not tiers:
         sys.exit(f"Organization {ORG!r} has no monthly tiers configured.")
 
-    # Each monthly tier collects its (cents, login, website) entries.
-    monthly_by_tier: dict[int, list[tuple[int, str, str]]] = {t["cents"]: [] for t in tiers}
-    onetime_high: list[tuple[int, str, str]] = []
-    onetime_low: list[tuple[int, str, str]] = []
+    monthly = collect(data["organization"]["active"]["nodes"], tiers, want_one_time=False)
+    onetime = collect(data["organization"]["all"]["nodes"], tiers, want_one_time=True)
 
-    # Active sponsorships -> monthly buckets (only currently-paying monthly subscribers).
-    for s in data["organization"]["active"]["nodes"]:
-        tier_info = s.get("tier") or {}
-        if tier_info.get("isOneTime"):
-            continue
-        cents = tier_info.get("monthlyPriceInCents") or 0
-        if cents < tiers[-1]["cents"]:
-            continue
-        target = next((t for t in tiers if t["cents"] <= cents), None)
-        if target is None:
-            continue
-        entity = s["sponsorEntity"]
-        login = entity["login"]
-        website = normalize_url(entity.get("websiteUrl"), login)
-        monthly_by_tier[target["cents"]].append((cents, login, website))
+    monthly_table = render_table(
+        tiers,
+        monthly,
+        MONTHLY_TIER_PX,
+        f'Be the first monthly sponsor and <a href="https://github.com/sponsors/{ORG}">support {ORG}</a>.',
+    )
+    onetime_table = render_table(
+        tiers,
+        onetime,
+        ONETIME_TIER_PX,
+        f'Thank-you donations welcome at <a href="https://github.com/sponsors/{ORG}">github.com/sponsors/{ORG}</a>.',
+    )
 
-    # All sponsorships -> one-time buckets (keep historical donations, split $100+ vs other).
-    for s in data["organization"]["all"]["nodes"]:
-        tier_info = s.get("tier") or {}
-        if not tier_info.get("isOneTime"):
-            continue
-        cents = tier_info.get("monthlyPriceInCents") or 0
-        if cents < 1:
-            continue
-        entity = s["sponsorEntity"]
-        login = entity["login"]
-        website = normalize_url(entity.get("websiteUrl"), login)
-        (onetime_high if cents >= ONETIME_HIGH_THRESHOLD_CENTS else onetime_low).append(
-            (cents, login, website)
-        )
-
-    # Stable ordering: each bucket sorted by cents descending so larger sponsors lead.
-    tiered_monthly = [
-        (
-            t,
-            [(login, website) for _, login, website in sorted(monthly_by_tier[t["cents"]], key=lambda r: -r[0])],
-        )
-        for t in tiers
-    ]
-    onetime_high.sort(key=lambda r: -r[0])
-    onetime_low.sort(key=lambda r: -r[0])
-    high = [(login, website) for _, login, website in onetime_high]
-    low = [(login, website) for _, login, website in onetime_low]
-
-    block = f"{render_monthly(tiered_monthly)}\n\n{render_onetime(high, low)}"
+    block = (
+        "### 📅 Monthly Sponsors\n\n"
+        f"{monthly_table}\n\n"
+        "### 🎁 One-time Sponsors\n\n"
+        f"{onetime_table}"
+    )
 
     with open(FILE, "r", encoding="utf-8") as fh:
         content = fh.read()
@@ -256,11 +250,9 @@ def main() -> None:
     with open(FILE, "w", encoding="utf-8") as fh:
         fh.write(new_content)
 
-    monthly_count = sum(len(rows) for _, rows in tiered_monthly)
-    print(
-        f"Wrote {monthly_count} active monthly + {len(high)} one-time $100+ + "
-        f"{len(low)} other one-time to {FILE}"
-    )
+    monthly_count = sum(len(v) for v in monthly.values())
+    onetime_count = sum(len(v) for v in onetime.values())
+    print(f"Wrote {monthly_count} active monthly + {onetime_count} one-time sponsors to {FILE}")
 
 
 if __name__ == "__main__":
