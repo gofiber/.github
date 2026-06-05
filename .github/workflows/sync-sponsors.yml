@@ -1,28 +1,33 @@
 name: sync-sponsors
 
-# Reusable workflow that refreshes the GitHub Sponsors tier sections
-# in a repo's top-level README. Caller wrappers in each gofiber repo
-# stay ~10 lines.
+# Reusable workflow that refreshes the gofiber Sponsors table in a repo's
+# top-level README. Caller wrappers in each gofiber repo stay ~10 lines.
 #
-# The README must contain two marker pairs at the desired insert spots
-# inside an HTML <table> (we use HTML instead of markdown table because
-# markdown tables break when HTML comments live between rows):
+# The README must contain ONE marker pair at the desired insert spot inside
+# an HTML <table> (we use HTML instead of a markdown table because markdown
+# tables break when HTML comments live between rows):
 #
 #   <table>
 #     <thead><tr><th></th><th>User</th><th>Sponsorship</th></tr></thead>
 #     <tbody>
-#       <!-- guardian --><!-- guardian -->
-#       <!-- supporter --><!-- supporter -->
+#       <!-- sponsors-table -->
+#       <!-- sponsors-table -->
 #     </tbody>
 #   </table>
 #
-# The org-level secret SPONSORS_TOKEN must hold a classic PAT created by
-# a gofiber org owner with read:user + read:org scopes. The default
-# GITHUB_TOKEN cannot read org-level Sponsors data.
+# The org-level secret SPONSORS_TOKEN must hold a classic PAT created by a
+# gofiber org owner with read:user + read:org + repo scopes. read:user is
+# required because the action queries the privacyLevel and createdAt fields
+# on each sponsorship; without it the whole GraphQL request is rejected and
+# zero sponsors come back. read:org is required for organization-level
+# sponsorships. repo is required because the same PAT is used for the git
+# push that lands the README change on protected branches.
 #
-# Two tier steps = two GraphQL calls per run, well within rate limits.
-# `active-only: false` includes one-time donations (the org has many
-# of those and the colleague's reference table also lists them).
+# The central sync_sponsors.py script lives alongside the existing sync_docs
+# script in this repo at .github/scripts/. Tier names are pulled from each
+# tier's description on github.com/sponsors/<org>, so renaming or adding a
+# tier on the platform is automatically reflected in the next sync run with
+# no code change.
 
 on:
   workflow_call:
@@ -31,38 +36,13 @@ on:
         description: 'README path within the calling repo'
         type: string
         default: 'README.md'
-      guardian-template:
-        description: 'Mustache row template for the guardian tier (HTML <tr>; markdown table breaks on inline HTML comments, so we use an HTML table)'
-        type: string
-        default: "<tr><td align=\"center\"><img src=\"{{{ avatarUrl }}}\" width=\"40\" /></td><td><a href=\"{{{ websiteUrl }}}\">@{{{ login }}}</a></td><td>🔥 Fiber Guardian</td></tr>\n"
-      supporter-template:
-        description: 'Mustache row template for the supporter tier'
-        type: string
-        default: "<tr><td align=\"center\"><img src=\"{{{ avatarUrl }}}\" width=\"40\" /></td><td><a href=\"{{{ websiteUrl }}}\">@{{{ login }}}</a></td><td>☕ Fiber Supporter</td></tr>\n"
-      guardian-minimum:
-        description: 'Lower bound (cents) for the guardian tier'
-        type: number
-        default: 10000
-      supporter-minimum:
-        description: 'Lower bound (cents) for the supporter tier'
-        type: number
-        default: 1
-      supporter-maximum:
-        description: 'Upper bound (cents) for the supporter tier'
-        type: number
-        default: 9999
-      guardian-fallback:
-        type: string
-        default: '<tr><td colspan="3"><em>Be the first Fiber Guardian and <a href="https://github.com/sponsors/gofiber">sponsor gofiber</a>.</em></td></tr>'
-      supporter-fallback:
-        type: string
-        default: '<tr><td colspan="3"><em>Be the first Fiber Supporter and <a href="https://github.com/sponsors/gofiber">sponsor gofiber</a>.</em></td></tr>'
       commit-message:
+        description: 'Commit message for the README update'
         type: string
         default: 'docs(readme): sync GitHub Sponsors'
     secrets:
       sponsors-token:
-        description: 'PAT with read:user + read:org scopes (gofiber org owner account)'
+        description: 'PAT with read:user + read:org + repo scopes (gofiber org owner account)'
         required: true
 
 permissions:
@@ -76,37 +56,22 @@ jobs:
       - name: Checkout calling repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Use the SPONSORS_TOKEN PAT for the checkout so the subsequent
-          # `git push` authenticates as the PAT owner (an org owner) and
-          # can write to the default branch even when branch protection
-          # rejects pushes from github-actions[bot]. Note: pushes by a
-          # PAT do trigger other on-push workflows; that is intentional.
+          # SPONSORS_TOKEN drives the subsequent `git push` so it can land on
+          # protected default branches that reject github-actions[bot].
           token: ${{ secrets.sponsors-token }}
 
-      - name: Sync guardian tier
-        uses: JamesIves/github-sponsors-readme-action@2fd9142e765f755780202122261dc85e78459405 # v1.6.0
+      - name: Checkout central scripts
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          token: ${{ secrets.sponsors-token }}
-          file: ${{ inputs.file }}
-          marker: guardian
-          minimum: ${{ inputs.guardian-minimum }}
-          organization: true
-          active-only: false
-          template: ${{ inputs.guardian-template }}
-          fallback: ${{ inputs.guardian-fallback }}
+          repository: gofiber/.github
+          path: .central
 
-      - name: Sync supporter tier
-        uses: JamesIves/github-sponsors-readme-action@2fd9142e765f755780202122261dc85e78459405 # v1.6.0
-        with:
-          token: ${{ secrets.sponsors-token }}
-          file: ${{ inputs.file }}
-          marker: supporter
-          minimum: ${{ inputs.supporter-minimum }}
-          maximum: ${{ inputs.supporter-maximum }}
-          organization: true
-          active-only: false
-          template: ${{ inputs.supporter-template }}
-          fallback: ${{ inputs.supporter-fallback }}
+      - name: Render sponsors table
+        env:
+          SPONSORS_TOKEN: ${{ secrets.sponsors-token }}
+          ORG: ${{ github.repository_owner }}
+          FILE: ${{ inputs.file }}
+        run: python3 .central/.github/scripts/sync_sponsors.py
 
       - name: Commit README updates
         env:

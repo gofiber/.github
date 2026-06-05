@@ -49,7 +49,7 @@ The following reusable workflows now live in this repository and can be called f
 - `security-golang.yml`: Runs `govulncheck` and optionally CodeQL for Go projects.
 - `sync-docs.yml`: Syncs documentation (or any path) to another repository and branch with a provided token.
 - `auto-labeler.yml`: Applies centralized label mappings and can optionally sync label definitions across repositories.
-- `sync-sponsors.yml`: Refreshes the GitHub Sponsors tier sections (gold/silver/bronze) in a repo's top-level README via `JamesIves/github-sponsors-readme-action`. Requires the org-level `SPONSORS_TOKEN` secret (PAT with `read:user` + `read:org`).
+- `sync-sponsors.yml`: Refreshes the GitHub Sponsors table in a repo's top-level README. Calls `.github/scripts/sync_sponsors.py`, which fetches the org's tier listing and current sponsorships via the GraphQL API, derives each tier's display title from the first heading line of the tier description (so renaming or adding tiers on github.com/sponsors/&lt;org&gt; propagates without code changes), buckets sponsors by their monthly price, and replaces the content between `<!-- sponsors-table -->` markers. Requires the org-level `SPONSORS_TOKEN` secret (classic PAT with `read:user` + `read:org` + `repo` scopes; `read:user` is mandatory because the GraphQL query touches `privacyLevel` and `createdAt`).
 
 Shared configuration that accompanies these workflows:
 
