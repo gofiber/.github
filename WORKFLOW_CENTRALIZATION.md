@@ -49,6 +49,7 @@ The following reusable workflows now live in this repository and can be called f
 - `security-golang.yml`: Runs `govulncheck` and optionally CodeQL for Go projects.
 - `sync-docs.yml`: Syncs documentation (or any path) to another repository and branch with a provided token.
 - `auto-labeler.yml`: Applies centralized label mappings and can optionally sync label definitions across repositories.
+- `sync-sponsors.yml`: Refreshes the GitHub Sponsors tier sections (gold/silver/bronze) in a repo's top-level README via `JamesIves/github-sponsors-readme-action`. Requires the org-level `SPONSORS_TOKEN` secret (PAT with `read:user` + `read:org`).
 
 Shared configuration that accompanies these workflows:
 
