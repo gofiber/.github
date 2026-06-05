@@ -47,7 +47,7 @@ The following reusable workflows now live in this repository and can be called f
 - `release-drafter.yml`: Central Release Drafter runner with customizable config path and token.
 - `dependabot-automerge.yml`: Enables auto-merge for Dependabot pull requests using the GitHub CLI.
 - `security-golang.yml`: Runs `govulncheck` and optionally CodeQL for Go projects.
-- `sync-docs.yml`: Syncs documentation (or any path) to another repository and branch with a provided token.
+- `sync-docs.yml`: Syncs documentation (or any path) to another repository and branch with a provided token. Source READMEs may wrap GitHub-only sections with `<!-- skip-docs --><!-- skip-docs -->` comment markers; everything between a marker pair is stripped from the copied .md files before the docs build sees them, so the Sponsors block and similar repo-page-only content stay out of gofiber.io.
 - `auto-labeler.yml`: Applies centralized label mappings and can optionally sync label definitions across repositories.
 - `sync-sponsors.yml`: Refreshes the GitHub Sponsors table in a repo's top-level README. Calls `.github/scripts/sync_sponsors.py`, which fetches the org's tier listing and current sponsorships via the GraphQL API, derives each tier's display title from the first heading line of the tier description (so renaming or adding tiers on github.com/sponsors/&lt;org&gt; propagates without code changes), buckets sponsors by their monthly price, and replaces the content between `<!-- sponsors-table -->` markers. Requires the org-level `SPONSORS_TOKEN` secret (classic PAT with `read:user` + `read:org` + `repo` scopes; `read:user` is mandatory because the GraphQL query touches `privacyLevel` and `createdAt`).
 

@@ -85,6 +85,32 @@ handle_push() {
     args+=("${SOURCE_DIR}/" "${dest}/")
     rsync "${args[@]}"
     log "rsync completed"
+
+    strip_skip_docs_blocks "$dest"
+}
+
+# ─── Strip skip-docs blocks ─────────────────────────────────────────
+# Source READMEs can wrap GitHub-only content (Sponsors, Stargazers, ...) with
+# `<!-- skip-docs --><!-- skip-docs -->` markers. Everything between the two
+# markers, including the markers themselves, is removed from the copied .md
+# files before the docs build sees them. Multiple skip blocks per file are
+# fine; unclosed markers are left intact (the regex requires a matching pair).
+strip_skip_docs_blocks() {
+    local dest="$1"
+    python3 - "$dest" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+pattern = re.compile(r"<!-- skip-docs -->.*?<!-- skip-docs -->\n?", re.DOTALL)
+for md in root.rglob("*.md"):
+    text = md.read_text(encoding="utf-8")
+    stripped = pattern.sub("", text)
+    if stripped != text:
+        md.write_text(stripped, encoding="utf-8")
+        print(f"sync_docs: stripped skip-docs blocks from {md.relative_to(root)}", flush=True)
+PY
 }
 
 # ─── npm ci (run once, cached) ──────────────────────────────────────
