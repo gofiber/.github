@@ -80,9 +80,10 @@ query($org: String!) {
         tier { monthlyPriceInCents isOneTime }
       }
     }
-    all: sponsorshipsAsMaintainer(first: 100, activeOnly: false, includePrivate: false) {
+    all: sponsorshipsAsMaintainer(first: 100, activeOnly: false, includePrivate: false, orderBy: {field: CREATED_AT, direction: DESC}) {
       nodes {
         createdAt
+        tierSelectedAt
         sponsorEntity {
           ... on User { login name url websiteUrl }
           ... on Organization { login name url websiteUrl }
@@ -202,8 +203,10 @@ def collect(
         if bool(tier_info.get("isOneTime")) != want_one_time:
             continue
         if since is not None:
-            created = parse_created_at(s.get("createdAt"))
-            if created is None or created < since:
+            # Prefer the tier-selection date (when the donation was actually
+            # made) and fall back to the sponsorship creation date.
+            donated_at = parse_created_at(s.get("tierSelectedAt")) or parse_created_at(s.get("createdAt"))
+            if donated_at is None or donated_at < since:
                 continue
         cents = tier_info.get("monthlyPriceInCents") or 0
         if cents < tiers[-1]["cents"]:
@@ -265,7 +268,7 @@ def main() -> None:
     block = (
         "### 📅 Monthly Sponsors\n\n"
         f"{monthly_table}\n\n"
-        "### 🎁 One-time Sponsors\n\n"
+        "### 🎁 One-time Sponsors (last 6 months)\n\n"
         f"{onetime_table}"
     )
 
