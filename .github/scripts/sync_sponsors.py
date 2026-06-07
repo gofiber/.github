@@ -14,6 +14,8 @@ tier in the second cell. Avatar size shrinks for the lower tiers so the
 section stays compact regardless of sponsor count. Monthly sponsors are
 filtered to currently-active subscriptions; one-time donations are bucketed
 into the same tier set so the labels match what donors see on the platform.
+One-time donations are additionally limited to the last six months so the
+section reflects recent supporters rather than growing without bound.
 """
 from __future__ import annotations
 
@@ -22,11 +24,17 @@ import os
 import re
 import sys
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from html import escape
 
 ORG = os.environ['ORG']
 TOKEN = os.environ['SPONSORS_TOKEN']
 FILE = os.environ.get('FILE', 'README.md')
+
+# Only one-time donations created within this window are shown; monthly
+# sponsors are unaffected. Roughly six months (counted in days so it stays a
+# plain stdlib timedelta).
+ONETIME_WINDOW_DAYS = 183
 
 # Avatar sizes per tier value (cents). Bigger tiers render larger; tiers full
 # of sponsors render smaller so a packed row still fits comfortably.
@@ -72,8 +80,10 @@ query($org: String!) {
         tier { monthlyPriceInCents isOneTime }
       }
     }
-    all: sponsorshipsAsMaintainer(first: 100, activeOnly: false, includePrivate: false) {
+    all: sponsorshipsAsMaintainer(first: 100, activeOnly: false, includePrivate: false, orderBy: {field: CREATED_AT, direction: DESC}) {
       nodes {
+        createdAt
+        tierSelectedAt
         sponsorEntity {
           ... on User { login name url websiteUrl }
           ... on Organization { login name url websiteUrl }
@@ -172,12 +182,32 @@ def render_table(
     )
 
 
-def collect(nodes: list[dict], tiers: list[dict], want_one_time: bool) -> dict[int, list[tuple[str, str]]]:
+def parse_created_at(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def collect(
+    nodes: list[dict],
+    tiers: list[dict],
+    want_one_time: bool,
+    since: datetime | None = None,
+) -> dict[int, list[tuple[str, str]]]:
     grouped: dict[int, list[tuple[int, str, str]]] = {t["cents"]: [] for t in tiers}
     for s in nodes:
         tier_info = s.get("tier") or {}
         if bool(tier_info.get("isOneTime")) != want_one_time:
             continue
+        if since is not None:
+            # Prefer the tier-selection date (when the donation was actually
+            # made) and fall back to the sponsorship creation date.
+            donated_at = parse_created_at(s.get("tierSelectedAt")) or parse_created_at(s.get("createdAt"))
+            if donated_at is None or donated_at < since:
+                continue
         cents = tier_info.get("monthlyPriceInCents") or 0
         if cents < tiers[-1]["cents"]:
             continue
@@ -216,8 +246,11 @@ def main() -> None:
     if not tiers:
         sys.exit(f"Organization {ORG!r} has no monthly tiers configured.")
 
+    onetime_cutoff = datetime.now(timezone.utc) - timedelta(days=ONETIME_WINDOW_DAYS)
     monthly = collect(data["organization"]["active"]["nodes"], tiers, want_one_time=False)
-    onetime = collect(data["organization"]["all"]["nodes"], tiers, want_one_time=True)
+    onetime = collect(
+        data["organization"]["all"]["nodes"], tiers, want_one_time=True, since=onetime_cutoff
+    )
 
     monthly_table = render_table(
         tiers,
