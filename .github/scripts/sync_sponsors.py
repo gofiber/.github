@@ -268,7 +268,7 @@ def main() -> None:
     block = (
         "### 📅 Monthly Sponsors\n\n"
         f"{monthly_table}\n\n"
-        "### 🎁 One-time Sponsors (last 6 months)\n\n"
+        "### 🎁 One-time Sponsors\n\n"
         f"{onetime_table}"
     )
 
