@@ -9,12 +9,17 @@ on:
       - '.github/actions/**'
       - '.github/workflows/test-actions.yml'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   discover:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       go-modules: ${{ steps.go.outputs.modules }}
       has-go: ${{ steps.go.outputs.has-modules }}
@@ -48,6 +53,7 @@ jobs:
     needs: discover
     if: needs.discover.outputs.has-go == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:

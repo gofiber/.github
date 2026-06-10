@@ -35,6 +35,7 @@ permissions:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       packages: ${{ steps.set-packages.outputs.packages }}
     steps:
@@ -121,6 +122,7 @@ jobs:
     name: "lint (${{ matrix.package }})"
     needs: changes
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -131,7 +133,7 @@ jobs:
       - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: "${{ matrix.package }}/go.mod"
-          cache: false
+          cache-dependency-path: ${{ matrix.package }}/go.sum
 
       - uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9
         env:

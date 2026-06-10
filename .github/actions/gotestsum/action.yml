@@ -1,0 +1,29 @@
+name: gotestsum
+description: >-
+  Run Go tests through a pinned gotestsum version. Requires actions/setup-go to
+  run first; the binary is resolved via `go run` so it is served from the Go
+  module/build cache instead of hitting the proxy with @latest on every run.
+inputs:
+  version:
+    description: gotestsum version to use (update the default here to roll it out org-wide)
+    required: false
+    default: v1.13.0
+  format:
+    description: gotestsum output format
+    required: false
+    default: testname
+  args:
+    description: Arguments passed to go test after the -- separator
+    required: false
+    default: ./... -race -count=1 -shuffle=on
+  working-directory:
+    description: Directory to run the tests in
+    required: false
+    default: '.'
+runs:
+  using: composite
+  steps:
+    - name: Run gotestsum
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      run: go run gotest.tools/gotestsum@${{ inputs.version }} -f ${{ inputs.format }} -- ${{ inputs.args }}
