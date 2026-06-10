@@ -15,6 +15,11 @@ on:
         required: false
         type: number
         default: 10
+      wait-timeout-minutes:
+        description: 'Job timeout for the wait job. Raise together with delay-minutes.'
+        required: false
+        type: number
+        default: 30
       skip-wait:
         description: 'Skip the registry wait (e.g. manual workflow_dispatch).'
         required: false
@@ -31,6 +36,7 @@ permissions:
 jobs:
   wait:
     runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.wait-timeout-minutes }}
     outputs:
       matrix: ${{ steps.parse.outputs.matrix }}
     steps:
@@ -51,6 +57,7 @@ jobs:
   trigger:
     needs: wait
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       matrix:
         repo: ${{ fromJson(needs.wait.outputs.matrix) }}
