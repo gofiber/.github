@@ -1,0 +1,273 @@
+package main
+
+import (
+	"fmt"
+	"net/url"
+	"sort"
+	"time"
+)
+
+type Finding struct {
+	Repo     string
+	Check    string
+	Workflow string
+	Title    string
+	Detail   string
+	URL      string
+	Key      string // dedup/cooldown key in the state file
+}
+
+const (
+	checkMasterFailure    = "master-failure"
+	checkScheduledFailure = "scheduled-failure"
+	checkSameSHAFlip      = "same-sha-flip"
+	checkStartupFailure   = "startup-failure"
+	checkCrossPR          = "cross-pr"
+	checkDeadWorkflow     = "dead-workflow"
+	checkPRBacklog        = "pr-backlog"
+	checkIssueBacklog     = "issue-backlog"
+	checkStalePRs         = "stale-prs"
+	checkUnansweredIssues = "unanswered-issues"
+	checkIssueSpike       = "issue-spike"
+)
+
+// scanRepo runs the frequent checks: default-branch failures and workflows
+// failing across several PRs at once.
+func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, error) {
+	branch, err := g.defaultBranch(org, repo)
+	if err != nil {
+		return nil, err
+	}
+	branchRuns, err := g.listRuns(org, repo, url.Values{"branch": {branch}})
+	if err != nil {
+		return nil, err
+	}
+	findings := detectBranchFailures(repo, branchRuns)
+
+	since := now.Add(-time.Duration(th.CrossPRWindowHours) * time.Hour)
+	prRuns, err := g.listRuns(org, repo, url.Values{
+		"event":   {"pull_request"},
+		"status":  {"failure"},
+		"created": {">=" + since.Format(time.RFC3339)},
+	})
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, detectCrossPRFailures(repo, prRuns, th.CrossPRMinPRs)...)
+	return findings, nil
+}
+
+// detectBranchFailures reports default-branch workflows whose latest completed
+// run failed while the run before it succeeded (edge-triggered: an already-red
+// workflow does not re-alert). A failure on the same commit that was green
+// before can only be the environment, never the code; that distinction is
+// surfaced as its own check.
+func detectBranchFailures(repo string, runs []workflowRun) []Finding {
+	byWorkflow := map[int64][]workflowRun{}
+	for _, r := range runs { // runs arrive newest first
+		if r.Status != "completed" {
+			continue
+		}
+		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
+	}
+
+	var findings []Finding
+	for _, rs := range byWorkflow {
+		latest := rs[0]
+		switch latest.Conclusion {
+		case "failure":
+			if len(rs) < 2 || rs[1].Conclusion != "success" {
+				continue
+			}
+			prev := rs[1]
+			check := checkMasterFailure
+			detail := fmt.Sprintf("previous run on this branch was green (commit %.7s -> %.7s)", prev.HeadSHA, latest.HeadSHA)
+			if latest.HeadSHA == prev.HeadSHA {
+				check = checkSameSHAFlip
+				detail = fmt.Sprintf("commit %.7s was green and is red now with no code change, the environment broke", latest.HeadSHA)
+				if latest.Event == "schedule" {
+					check = checkScheduledFailure
+					detail = fmt.Sprintf("scheduled run went red on commit %.7s with no new commits, the environment broke", latest.HeadSHA)
+				}
+			}
+			findings = append(findings, Finding{
+				Repo:     repo,
+				Check:    check,
+				Workflow: latest.Name,
+				Title:    fmt.Sprintf("%s: %s failed on %s", repo, latest.Name, latest.HeadBranch),
+				Detail:   detail,
+				URL:      latest.HTMLURL,
+				Key:      fmt.Sprintf("%s/%s/%d/run-%d", repo, check, latest.WorkflowID, latest.ID),
+			})
+		case "startup_failure":
+			findings = append(findings, Finding{
+				Repo:     repo,
+				Check:    checkStartupFailure,
+				Workflow: latest.Name,
+				Title:    fmt.Sprintf("%s: %s cannot start", repo, latest.Name),
+				Detail:   "the workflow file itself is broken (startup_failure)",
+				URL:      latest.HTMLURL,
+				Key:      fmt.Sprintf("%s/%s/%d", repo, checkStartupFailure, latest.WorkflowID),
+			})
+		}
+	}
+	sortFindings(findings)
+	return findings
+}
+
+// detectCrossPRFailures flags a workflow that failed on at least minPRs
+// distinct PR branches inside the window. Unrelated PRs cannot all be at
+// fault, so the shared infrastructure is. A single PR failing repeatedly
+// stays below the threshold by design: that is the PR's own problem.
+func detectCrossPRFailures(repo string, runs []workflowRun, minPRs int) []Finding {
+	type agg struct {
+		branches map[string]bool
+		latest   workflowRun
+	}
+	byWorkflow := map[int64]*agg{}
+	for _, r := range runs { // newest first
+		if r.Conclusion != "failure" {
+			continue
+		}
+		a := byWorkflow[r.WorkflowID]
+		if a == nil {
+			a = &agg{branches: map[string]bool{}, latest: r}
+			byWorkflow[r.WorkflowID] = a
+		}
+		a.branches[r.HeadBranch] = true
+	}
+
+	var findings []Finding
+	for id, a := range byWorkflow {
+		if len(a.branches) < minPRs {
+			continue
+		}
+		findings = append(findings, Finding{
+			Repo:     repo,
+			Check:    checkCrossPR,
+			Workflow: a.latest.Name,
+			Title:    fmt.Sprintf("%s: %s is failing across %d PRs", repo, a.latest.Name, len(a.branches)),
+			Detail:   "the same workflow fails on PRs from different branches, this is systemic, not the PRs' fault",
+			URL:      a.latest.HTMLURL,
+			Key:      fmt.Sprintf("%s/%s/%d", repo, checkCrossPR, id),
+		})
+	}
+	sortFindings(findings)
+	return findings
+}
+
+// digestRepo runs the daily backlog and hygiene checks.
+func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, error) {
+	var findings []Finding
+	full := org + "/" + repo
+
+	openPRs, err := g.searchCount("repo:" + full + " is:pr is:open")
+	if err != nil {
+		return nil, err
+	}
+	if openPRs > th.MaxOpenPRs {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkPRBacklog,
+			Title:  fmt.Sprintf("%s: PR backlog", repo),
+			Detail: fmt.Sprintf("%d open PRs (threshold %d)", openPRs, th.MaxOpenPRs),
+			URL:    fmt.Sprintf("https://github.com/%s/pulls", full),
+			Key:    repo + "/" + checkPRBacklog,
+		})
+	}
+
+	openIssues, err := g.searchCount("repo:" + full + " is:issue is:open")
+	if err != nil {
+		return nil, err
+	}
+	if openIssues > th.MaxOpenIssues {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkIssueBacklog,
+			Title:  fmt.Sprintf("%s: issue backlog", repo),
+			Detail: fmt.Sprintf("%d open issues (threshold %d)", openIssues, th.MaxOpenIssues),
+			URL:    fmt.Sprintf("https://github.com/%s/issues", full),
+			Key:    repo + "/" + checkIssueBacklog,
+		})
+	}
+
+	staleDate := now.AddDate(0, 0, -th.StalePRDays).Format("2006-01-02")
+	stale, err := g.searchCount("repo:" + full + " is:pr is:open draft:false review:none created:<" + staleDate)
+	if err != nil {
+		return nil, err
+	}
+	if stale > th.MaxStalePRs {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkStalePRs,
+			Title:  fmt.Sprintf("%s: PRs without review", repo),
+			Detail: fmt.Sprintf("%d open PRs older than %d days with no review (threshold %d)", stale, th.StalePRDays, th.MaxStalePRs),
+			URL:    fmt.Sprintf("https://github.com/%s/pulls?q=is%%3Apr+is%%3Aopen+draft%%3Afalse+review%%3Anone", full),
+			Key:    repo + "/" + checkStalePRs,
+		})
+	}
+
+	unansweredDate := now.AddDate(0, 0, -th.UnansweredIssueDays).Format("2006-01-02")
+	unanswered, err := g.searchCount("repo:" + full + " is:issue is:open comments:0 created:<" + unansweredDate)
+	if err != nil {
+		return nil, err
+	}
+	if unanswered > th.MaxUnansweredIssues {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkUnansweredIssues,
+			Title:  fmt.Sprintf("%s: unanswered issues", repo),
+			Detail: fmt.Sprintf("%d open issues older than %d days with zero comments (threshold %d)", unanswered, th.UnansweredIssueDays, th.MaxUnansweredIssues),
+			URL:    fmt.Sprintf("https://github.com/%s/issues?q=is%%3Aissue+is%%3Aopen+comments%%3A0", full),
+			Key:    repo + "/" + checkUnansweredIssues,
+		})
+	}
+
+	// Issue spike: the last 24h against the 14-day average. A sudden burst of
+	// new issues is the earliest external signal of a broken release.
+	lastDay, err := g.searchCount("repo:" + full + " is:issue created:>=" + now.Add(-24*time.Hour).Format("2006-01-02T15:04:05Z"))
+	if err != nil {
+		return nil, err
+	}
+	twoWeeks, err := g.searchCount("repo:" + full + " is:issue created:>=" + now.AddDate(0, 0, -14).Format("2006-01-02"))
+	if err != nil {
+		return nil, err
+	}
+	avg := float64(twoWeeks) / 14
+	if lastDay >= th.IssueSpikeMinCount && float64(lastDay) >= th.IssueSpikeFactor*avg {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkIssueSpike,
+			Title:  fmt.Sprintf("%s: issue spike", repo),
+			Detail: fmt.Sprintf("%d new issues in 24h against a 14-day average of %.1f/day, possibly a broken release", lastDay, avg),
+			URL:    fmt.Sprintf("https://github.com/%s/issues?q=is%%3Aissue+sort%%3Acreated-desc", full),
+			Key:    repo + "/" + checkIssueSpike,
+		})
+	}
+
+	workflows, err := g.listWorkflows(org, repo)
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range workflows {
+		if w.State != "disabled_inactivity" {
+			continue
+		}
+		findings = append(findings, Finding{
+			Repo:     repo,
+			Check:    checkDeadWorkflow,
+			Workflow: w.Name,
+			Title:    fmt.Sprintf("%s: %s was disabled by GitHub", repo, w.Name),
+			Detail:   "scheduled workflow disabled after 60 days of repo inactivity, re-enable it if it is still needed",
+			URL:      w.HTMLURL,
+			Key:      fmt.Sprintf("%s/%s/%d", repo, checkDeadWorkflow, w.ID),
+		})
+	}
+
+	sortFindings(findings)
+	return findings, nil
+}
+
+func sortFindings(fs []Finding) {
+	sort.Slice(fs, func(i, j int) bool { return fs[i].Key < fs[j].Key })
+}

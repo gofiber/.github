@@ -1,0 +1,41 @@
+{
+  "org": "gofiber",
+  "excludeRepos": [],
+  "defaults": {
+    "maxOpenPRs": 25,
+    "maxOpenIssues": 60,
+    "stalePRDays": 14,
+    "maxStalePRs": 5,
+    "unansweredIssueDays": 14,
+    "maxUnansweredIssues": 10,
+    "crossPRMinPRs": 3,
+    "crossPRWindowHours": 24,
+    "issueSpikeFactor": 3.0,
+    "issueSpikeMinCount": 5,
+    "cooldownHours": 72
+  },
+  "repoOverrides": {
+    "fiber": {
+      "maxOpenPRs": 40,
+      "maxOpenIssues": 300,
+      "maxStalePRs": 15,
+      "maxUnansweredIssues": 30
+    },
+    "contrib": {
+      "maxOpenPRs": 30,
+      "maxOpenIssues": 100,
+      "maxStalePRs": 10,
+      "maxUnansweredIssues": 20
+    },
+    "storage": {
+      "maxOpenPRs": 30,
+      "maxOpenIssues": 100,
+      "maxStalePRs": 10,
+      "maxUnansweredIssues": 20
+    },
+    "recipes": {
+      "maxOpenIssues": 100,
+      "maxUnansweredIssues": 20
+    }
+  }
+}

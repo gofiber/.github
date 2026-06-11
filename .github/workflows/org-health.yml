@@ -1,0 +1,66 @@
+name: Org Health
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # failure scan
+    - cron: '0 8 * * *' # daily digest
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Check mode
+        required: false
+        default: scan
+        type: choice
+        options:
+          - scan
+          - digest
+      dry_run:
+        description: Print findings instead of posting to Discord
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: stable
+          cache: false # org-health has no dependencies, there is no go.sum to key a cache on
+
+      - name: Restore state
+        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: org-health/state.json
+          key: org-health-state-${{ github.run_id }}
+          restore-keys: |
+            org-health-state-
+
+      - name: Run health check
+        working-directory: org-health
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_HEALTH }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '0 8 * * *' && 'digest' || 'scan') }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: go run .
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: org-health/state.json
+          key: org-health-state-${{ github.run_id }}
