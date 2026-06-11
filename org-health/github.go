@@ -59,6 +59,9 @@ type workflowRun struct {
 	Conclusion string    `json:"conclusion"`
 	CreatedAt  time.Time `json:"created_at"`
 	HTMLURL    string    `json:"html_url"`
+	Actor      struct {
+		Login string `json:"login"`
+	} `json:"actor"`
 }
 
 type workflowInfo struct {

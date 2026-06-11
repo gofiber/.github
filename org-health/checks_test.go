@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,13 +94,19 @@ func TestDetectBranchFailuresStartupFailure(t *testing.T) {
 	}
 }
 
+func actorRun(id, workflowID int64, branch, actor string) workflowRun {
+	r := run(id, workflowID, branch, branch+"-sha", "pull_request", "failure")
+	r.Actor.Login = actor
+	return r
+}
+
 func TestDetectCrossPRFailures(t *testing.T) {
 	threeBranches := []workflowRun{
 		run(3, 7, "feat-c", "ccc", "pull_request", "failure"),
 		run(2, 7, "feat-b", "bbb", "pull_request", "failure"),
 		run(1, 7, "feat-a", "aaa", "pull_request", "failure"),
 	}
-	if got := detectCrossPRFailures("storage", threeBranches, 3); len(got) != 1 {
+	if got := detectCrossPRFailures("storage", threeBranches, nil, 3); len(got) != 1 {
 		t.Fatalf("3 distinct branches: got %d findings, want 1", len(got))
 	}
 
@@ -108,13 +115,44 @@ func TestDetectCrossPRFailures(t *testing.T) {
 		run(2, 7, "feat-a", "a2", "pull_request", "failure"),
 		run(1, 7, "feat-a", "a1", "pull_request", "failure"),
 	}
-	if got := detectCrossPRFailures("storage", onePRRetried, 3); len(got) != 0 {
+	if got := detectCrossPRFailures("storage", onePRRetried, nil, 3); len(got) != 0 {
 		t.Fatalf("one PR retried: got %d findings, want 0", len(got))
 	}
 
 	twoBranches := threeBranches[1:]
-	if got := detectCrossPRFailures("storage", twoBranches, 3); len(got) != 0 {
+	if got := detectCrossPRFailures("storage", twoBranches, nil, 3); len(got) != 0 {
 		t.Fatalf("below threshold: got %d findings, want 0", len(got))
+	}
+}
+
+// Reference case D: grouped dependency bumps fail many PRs at once while
+// the default branch stays green; that is the bumps' own problem.
+func TestDetectCrossPRFailuresBotSuppression(t *testing.T) {
+	botPRs := []workflowRun{
+		actorRun(3, 7, "dependabot/a", "dependabot[bot]"),
+		actorRun(2, 7, "dependabot/b", "dependabot[bot]"),
+		actorRun(1, 7, "dependabot/c", "dependabot[bot]"),
+	}
+	greenMain := []workflowRun{run(10, 7, "main", "mmm", "push", "success")}
+	redMain := []workflowRun{run(10, 7, "main", "mmm", "push", "failure")}
+	otherWorkflowGreen := []workflowRun{run(10, 8, "main", "mmm", "push", "success")}
+	mixedActors := append([]workflowRun{actorRun(4, 7, "feat-x", "human")}, botPRs...)
+
+	if got := detectCrossPRFailures("storage", botPRs, greenMain, 3); len(got) != 0 {
+		t.Fatalf("sole bot actor with green default branch: got %d findings, want 0", len(got))
+	}
+	got := detectCrossPRFailures("storage", botPRs, redMain, 3)
+	if len(got) != 1 {
+		t.Fatalf("sole bot actor without green default branch: got %d findings, want 1", len(got))
+	}
+	if !strings.Contains(got[0].Detail, "dependabot[bot]") {
+		t.Fatalf("finding should name the bot, got detail %q", got[0].Detail)
+	}
+	if got := detectCrossPRFailures("storage", botPRs, otherWorkflowGreen, 3); len(got) != 1 {
+		t.Fatalf("green run of a different workflow must not suppress: got %d findings, want 1", len(got))
+	}
+	if got := detectCrossPRFailures("storage", mixedActors, greenMain, 3); len(got) != 1 {
+		t.Fatalf("mixed actors stay systemic despite green default branch: got %d findings, want 1", len(got))
 	}
 }
 

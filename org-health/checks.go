@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -53,7 +54,13 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 	if err != nil {
 		return nil, err
 	}
-	findings = append(findings, detectCrossPRFailures(repo, prRuns, th.CrossPRMinPRs)...)
+	var recentBranchRuns []workflowRun
+	for _, r := range branchRuns {
+		if r.CreatedAt.After(since) {
+			recentBranchRuns = append(recentBranchRuns, r)
+		}
+	}
+	findings = append(findings, detectCrossPRFailures(repo, prRuns, recentBranchRuns, th.CrossPRMinPRs)...)
 	return findings, nil
 }
 
@@ -119,22 +126,39 @@ func detectBranchFailures(repo string, runs []workflowRun) []Finding {
 // distinct PR branches inside the window. Unrelated PRs cannot all be at
 // fault, so the shared infrastructure is. A single PR failing repeatedly
 // stays below the threshold by design: that is the PR's own problem.
-func detectCrossPRFailures(repo string, runs []workflowRun, minPRs int) []Finding {
+//
+// Exception (reference case D): grouped dependency bumps open many PRs at
+// once that all fail on their own breaking change, which looks systemic
+// but is not. When every failing run was opened by the same bot AND the
+// same workflow had a green run on the default branch inside the window
+// (the environment is provably healthy), the finding is suppressed. With
+// no green default-branch run the finding still fires, annotated with the
+// bot name so the reader can judge.
+func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun, minPRs int) []Finding {
+	greenOnDefault := map[int64]bool{}
+	for _, r := range defaultBranchRuns {
+		if r.Status == "completed" && r.Conclusion == "success" {
+			greenOnDefault[r.WorkflowID] = true
+		}
+	}
+
 	type agg struct {
 		branches map[string]bool
+		actors   map[string]bool
 		latest   workflowRun
 	}
 	byWorkflow := map[int64]*agg{}
-	for _, r := range runs { // newest first
+	for _, r := range prRuns { // newest first
 		if r.Conclusion != "failure" {
 			continue
 		}
 		a := byWorkflow[r.WorkflowID]
 		if a == nil {
-			a = &agg{branches: map[string]bool{}, latest: r}
+			a = &agg{branches: map[string]bool{}, actors: map[string]bool{}, latest: r}
 			byWorkflow[r.WorkflowID] = a
 		}
 		a.branches[r.HeadBranch] = true
+		a.actors[r.Actor.Login] = true
 	}
 
 	var findings []Finding
@@ -142,18 +166,38 @@ func detectCrossPRFailures(repo string, runs []workflowRun, minPRs int) []Findin
 		if len(a.branches) < minPRs {
 			continue
 		}
+		bot, soleBot := soleBotActor(a.actors)
+		if soleBot && greenOnDefault[id] {
+			continue
+		}
+		detail := "the same workflow fails on PRs from different branches, this is systemic, not the PRs' fault"
+		if soleBot {
+			detail = fmt.Sprintf("the same workflow fails on PRs from different branches, all opened by %s; grouped dependency bumps can look like this without being systemic, but there is no green default-branch run in the window to clear the environment", bot)
+		}
 		findings = append(findings, Finding{
 			Repo:     repo,
 			Check:    checkCrossPR,
 			Workflow: a.latest.Name,
 			Title:    fmt.Sprintf("%s: %s is failing across %d PRs", repo, a.latest.Name, len(a.branches)),
-			Detail:   "the same workflow fails on PRs from different branches, this is systemic, not the PRs' fault",
+			Detail:   detail,
 			URL:      a.latest.HTMLURL,
 			Key:      fmt.Sprintf("%s/%s/%d", repo, checkCrossPR, id),
 		})
 	}
 	sortFindings(findings)
 	return findings
+}
+
+// soleBotActor reports whether every aggregated run came from one single
+// actor and that actor is a bot account.
+func soleBotActor(actors map[string]bool) (string, bool) {
+	if len(actors) != 1 {
+		return "", false
+	}
+	for a := range actors {
+		return a, strings.HasSuffix(a, "[bot]")
+	}
+	return "", false
 }
 
 // digestRepo runs the daily backlog and hygiene checks.
