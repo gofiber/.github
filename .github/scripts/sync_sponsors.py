@@ -278,7 +278,9 @@ def main() -> None:
     pattern = re.compile(r"<!-- sponsors -->.*?<!-- sponsors -->", re.DOTALL)
     if not pattern.search(content):
         sys.exit(f"Could not find <!-- sponsors --> markers in {FILE}")
-    new_content = pattern.sub(f"<!-- sponsors -->\n{block}\n<!-- sponsors -->", content)
+    # Keep a blank line after the opening marker so the rendered block stays
+    # Prettier-compliant; otherwise `prettier --check` fails on every PR.
+    new_content = pattern.sub(f"<!-- sponsors -->\n\n{block}\n<!-- sponsors -->", content)
 
     with open(FILE, "w", encoding="utf-8") as fh:
         fh.write(new_content)
