@@ -28,6 +28,11 @@ on:
         required: false
         default: v1.13.0
         type: string
+      rerun-fails:
+        description: Rerun failed unit tests up to N times to absorb flakes (0 disables)
+        required: false
+        default: '2'
+        type: string
       codecov-flags:
         description: Flags to pass to Codecov uploads
         required: false
@@ -81,7 +86,9 @@ jobs:
         with:
           version: ${{ inputs.gotestsum-version }}
           working-directory: ${{ inputs.working-directory }}
-          args: ${{ inputs.package-pattern }} -race -count=1 -coverprofile=coverage.txt -covermode=atomic -shuffle=on
+          packages: ${{ inputs.package-pattern }}
+          rerun-fails: ${{ inputs.rerun-fails }}
+          args: -race -count=1 -coverprofile=coverage.txt -covermode=atomic -shuffle=on
 
       - name: Upload coverage reports to Codecov
         if: ${{ inputs.enable-codecov && matrix.platform == 'ubuntu-latest' }}

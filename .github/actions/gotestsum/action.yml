@@ -13,9 +13,30 @@ inputs:
     required: false
     default: testname
   args:
-    description: Arguments passed to go test after the -- separator
+    description: >-
+      Arguments passed to go test after the -- separator. When rerun-fails is
+      enabled, pass only flags here and put the package pattern in `packages`.
     required: false
     default: ./... -race -count=1 -shuffle=on
+  packages:
+    description: >-
+      Package pattern for gotestsum --packages. Only used when rerun-fails is
+      enabled, where reruns need the package list separate from the test flags.
+    required: false
+    default: ./...
+  rerun-fails:
+    description: >-
+      Rerun only the failed tests up to N times to absorb flakes. A non-negative
+      integer; 0 (or empty) disables reruns. Requires -count=1 in args; the
+      package pattern must be in `packages`.
+    required: false
+    default: '0'
+  rerun-fails-max-failures:
+    description: >-
+      Do not rerun at all if the first run has more than this many failures (a
+      real breakage rather than an isolated flake).
+    required: false
+    default: '10'
   working-directory:
     description: Directory to run the tests in
     required: false
@@ -26,4 +47,26 @@ runs:
     - name: Run gotestsum
       shell: bash
       working-directory: ${{ inputs.working-directory }}
-      run: go run gotest.tools/gotestsum@${{ inputs.version }} -f ${{ inputs.format }} -- ${{ inputs.args }}
+      run: |
+        case "${{ inputs.rerun-fails }}" in
+          ''|0)
+            # Reruns disabled: identical to the plain gotestsum invocation.
+            go run gotest.tools/gotestsum@${{ inputs.version }} -f ${{ inputs.format }} -- ${{ inputs.args }}
+            ;;
+          *[!0-9]*)
+            echo "::error::rerun-fails must be a non-negative integer, got '${{ inputs.rerun-fails }}'"
+            exit 1
+            ;;
+          *)
+            # Rerun only the failed tests (not the whole suite) to absorb flakes,
+            # but skip reruns past --rerun-fails-max-failures so a genuine breakage
+            # still fails fast. --rerun-fails requires the package list in
+            # --packages, separate from the go test flags after --.
+            go run gotest.tools/gotestsum@${{ inputs.version }} \
+              -f ${{ inputs.format }} \
+              --rerun-fails=${{ inputs.rerun-fails }} \
+              --rerun-fails-max-failures=${{ inputs.rerun-fails-max-failures }} \
+              --packages="${{ inputs.packages }}" \
+              -- ${{ inputs.args }}
+            ;;
+        esac
