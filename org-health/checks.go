@@ -205,10 +205,29 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 	var findings []Finding
 	full := org + "/" + repo
 
-	openPRs, err := g.searchCount("repo:" + full + " is:pr is:open")
+	// All six counts come back in a single GraphQL request, off the REST search
+	// rate limit. Issue spike: the last 24h against the 14-day average; a sudden
+	// burst of new issues is the earliest external signal of a broken release.
+	staleDate := now.AddDate(0, 0, -th.StalePRDays).Format("2006-01-02")
+	unansweredDate := now.AddDate(0, 0, -th.UnansweredIssueDays).Format("2006-01-02")
+	counts, err := g.searchCounts(map[string]string{
+		"openPRs":    "repo:" + full + " is:pr is:open",
+		"openIssues": "repo:" + full + " is:issue is:open",
+		"stale":      "repo:" + full + " is:pr is:open draft:false review:none created:<" + staleDate,
+		"unanswered": "repo:" + full + " is:issue is:open comments:0 created:<" + unansweredDate,
+		"lastDay":    "repo:" + full + " is:issue created:>=" + now.Add(-24*time.Hour).Format("2006-01-02T15:04:05Z"),
+		"twoWeeks":   "repo:" + full + " is:issue created:>=" + now.AddDate(0, 0, -14).Format("2006-01-02"),
+	})
 	if err != nil {
 		return nil, err
 	}
+	openPRs := counts["openPRs"]
+	openIssues := counts["openIssues"]
+	stale := counts["stale"]
+	unanswered := counts["unanswered"]
+	lastDay := counts["lastDay"]
+	twoWeeks := counts["twoWeeks"]
+
 	if openPRs > th.MaxOpenPRs {
 		findings = append(findings, Finding{
 			Repo:   repo,
@@ -220,10 +239,6 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 		})
 	}
 
-	openIssues, err := g.searchCount("repo:" + full + " is:issue is:open")
-	if err != nil {
-		return nil, err
-	}
 	if openIssues > th.MaxOpenIssues {
 		findings = append(findings, Finding{
 			Repo:   repo,
@@ -235,11 +250,6 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 		})
 	}
 
-	staleDate := now.AddDate(0, 0, -th.StalePRDays).Format("2006-01-02")
-	stale, err := g.searchCount("repo:" + full + " is:pr is:open draft:false review:none created:<" + staleDate)
-	if err != nil {
-		return nil, err
-	}
 	if stale > th.MaxStalePRs {
 		findings = append(findings, Finding{
 			Repo:   repo,
@@ -251,11 +261,6 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 		})
 	}
 
-	unansweredDate := now.AddDate(0, 0, -th.UnansweredIssueDays).Format("2006-01-02")
-	unanswered, err := g.searchCount("repo:" + full + " is:issue is:open comments:0 created:<" + unansweredDate)
-	if err != nil {
-		return nil, err
-	}
 	if unanswered > th.MaxUnansweredIssues {
 		findings = append(findings, Finding{
 			Repo:   repo,
@@ -267,16 +272,6 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 		})
 	}
 
-	// Issue spike: the last 24h against the 14-day average. A sudden burst of
-	// new issues is the earliest external signal of a broken release.
-	lastDay, err := g.searchCount("repo:" + full + " is:issue created:>=" + now.Add(-24*time.Hour).Format("2006-01-02T15:04:05Z"))
-	if err != nil {
-		return nil, err
-	}
-	twoWeeks, err := g.searchCount("repo:" + full + " is:issue created:>=" + now.AddDate(0, 0, -14).Format("2006-01-02"))
-	if err != nil {
-		return nil, err
-	}
 	avg := float64(twoWeeks) / 14
 	if lastDay >= th.IssueSpikeMinCount && float64(lastDay) >= th.IssueSpikeFactor*avg {
 		findings = append(findings, Finding{
