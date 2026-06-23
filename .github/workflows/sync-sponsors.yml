@@ -33,7 +33,7 @@ on:
   workflow_call:
     inputs:
       file:
-        description: 'README path within the calling repo'
+        description: 'README path(s) within the calling repo, one per line. Multiple paths are rendered and committed together in a single commit.'
         type: string
         default: 'README.md'
       commit-message:
@@ -47,6 +47,12 @@ on:
 
 permissions:
   contents: write
+
+# Serialize runs per calling repo so a manual dispatch and the scheduled run
+# never push to the same branch at the same time.
+concurrency:
+  group: sync-sponsors-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -70,21 +76,54 @@ jobs:
         env:
           SPONSORS_TOKEN: ${{ secrets.sponsors-token }}
           ORG: ${{ github.repository_owner }}
-          FILE: ${{ inputs.file }}
-        run: python3 .central/.github/scripts/sync_sponsors.py
+          FILES: ${{ inputs.file }}
+        run: |
+          set -euo pipefail
+          # `file` may hold several paths (one per line); render each in turn.
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            echo "Rendering sponsors into $path"
+            FILE="$path" python3 .central/.github/scripts/sync_sponsors.py
+          done <<< "$FILES"
 
       - name: Commit README updates
         env:
-          FILE: ${{ inputs.file }}
+          FILES: ${{ inputs.file }}
           MSG: ${{ inputs.commit-message }}
         run: |
-          set -e
-          if git diff --quiet --exit-code -- "$FILE"; then
+          set -euo pipefail
+          # Collect every rendered file that actually changed, then land them
+          # all in ONE commit and ONE push. This avoids the per-file race that
+          # a job-per-file matrix hit when two pushes targeted the same branch.
+          changed=()
+          while IFS= read -r path; do
+            [ -z "$path" ] && continue
+            if ! git diff --quiet --exit-code -- "$path"; then
+              changed+=("$path")
+            fi
+          done <<< "$FILES"
+          if [ ${#changed[@]} -eq 0 ]; then
             echo "No README changes to commit."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "$FILE"
+          git add "${changed[@]}"
           git commit -m "$MSG"
-          git push
+          # Push once. If the branch moved underneath us (a maintainer merge or
+          # another workflow), rebase our single commit on top and retry so the
+          # update still lands as exactly one commit. A failed or conflicted
+          # rebase must not abort the step under `set -e`: clean it up and let
+          # the loop try again, falling through to a clear error if all attempts
+          # are exhausted (the next scheduled run re-renders from a fresh tree).
+          for attempt in 1 2 3 4 5; do
+            if git push; then
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt); rebasing on latest and retrying."
+            if ! git pull --rebase; then
+              git rebase --abort || true
+            fi
+          done
+          echo "Failed to push sponsors update after multiple attempts." >&2
+          exit 1
