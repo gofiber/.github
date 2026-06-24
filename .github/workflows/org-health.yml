@@ -42,7 +42,7 @@ jobs:
           cache: false # org-health has no dependencies, there is no go.sum to key a cache on
 
       - name: Restore state
-        uses: actions/cache/restore@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/restore@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: org-health/state.json
           key: org-health-state-${{ github.run_id }}
@@ -60,7 +60,7 @@ jobs:
 
       - name: Save state
         if: always()
-        uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        uses: actions/cache/save@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: org-health/state.json
           key: org-health-state-${{ github.run_id }}
