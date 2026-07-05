@@ -26,11 +26,13 @@ func loadState(path string) *State {
 }
 
 // filterAlerted drops findings whose key already fired within the cooldown
-// and records the ones that pass.
-func (s *State) filterAlerted(findings []Finding, cooldown time.Duration, now time.Time) []Finding {
+// and records the ones that pass. cooldownFor yields the cooldown for a
+// finding's repo, so a noisier repo can be given a longer quiet window than
+// the org default without a suppression entry.
+func (s *State) filterAlerted(findings []Finding, cooldownFor func(repo string) time.Duration, now time.Time) []Finding {
 	var out []Finding
 	for _, f := range findings {
-		if t, ok := s.Alerted[f.Key]; ok && now.Sub(t) < cooldown {
+		if t, ok := s.Alerted[f.Key]; ok && now.Sub(t) < cooldownFor(f.Repo) {
 			continue
 		}
 		s.Alerted[f.Key] = now

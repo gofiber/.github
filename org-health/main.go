@@ -83,8 +83,9 @@ func main() {
 	}
 
 	findings = applySuppressions(findings, sups, now, log.Printf)
-	cooldown := time.Duration(cfg.Defaults.CooldownHours) * time.Hour
-	findings = state.filterAlerted(findings, cooldown, now)
+	findings = state.filterAlerted(findings, func(repo string) time.Duration {
+		return time.Duration(cfg.thresholds(repo).CooldownHours) * time.Hour
+	}, now)
 
 	switch {
 	case len(findings) == 0:

@@ -65,14 +65,27 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 }
 
 // detectBranchFailures reports default-branch workflows whose latest completed
-// run failed while the run before it succeeded (edge-triggered: an already-red
-// workflow does not re-alert). A failure on the same commit that was green
-// before can only be the environment, never the code; that distinction is
-// surfaced as its own check.
+// run failed or timed out while the run before it succeeded (edge-triggered: an
+// already-red workflow does not re-alert). A timeout is treated as a failure:
+// a job that used to pass and now hangs until the runner kills it is a hung
+// dependency, the same infra signal a hard failure is. A failure on the same
+// commit that was green before can only be the environment, never the code;
+// that distinction is surfaced as its own check.
 func detectBranchFailures(repo string, runs []workflowRun) []Finding {
 	byWorkflow := map[int64][]workflowRun{}
 	for _, r := range runs { // runs arrive newest first
 		if r.Status != "completed" {
+			continue
+		}
+		// The branch filter matches head_branch, so a fork PR whose branch is
+		// named like the default branch shows up here. PR events are never
+		// default-branch signal.
+		if r.Event == "pull_request" || r.Event == "pull_request_target" {
+			continue
+		}
+		// Cancelled/skipped runs carry no green/red signal; keeping them would
+		// mask the transition edge (cancel-in-progress on busy branches).
+		if r.Conclusion == "cancelled" || r.Conclusion == "skipped" {
 			continue
 		}
 		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
@@ -82,7 +95,7 @@ func detectBranchFailures(repo string, runs []workflowRun) []Finding {
 	for _, rs := range byWorkflow {
 		latest := rs[0]
 		switch latest.Conclusion {
-		case "failure":
+		case "failure", "timed_out":
 			if len(rs) < 2 || rs[1].Conclusion != "success" {
 				continue
 			}

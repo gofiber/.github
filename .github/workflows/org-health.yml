@@ -3,7 +3,10 @@ name: Org Health
 on:
   schedule:
     - cron: '*/30 * * * *' # failure scan
-    - cron: '0 8 * * *' # daily digest
+    # 08:15 keeps the digest off the scan's :00/:30 grid; both crons firing in
+    # the same minute would queue two runs into the concurrency group, where a
+    # still-running scan lets one pending run displace the other.
+    - cron: '15 8 * * *' # daily digest
   workflow_dispatch:
     inputs:
       mode:
@@ -54,7 +57,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_HEALTH }}
-          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '0 8 * * *' && 'digest' || 'scan') }}
+          MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || (github.event.schedule == '15 8 * * *' && 'digest' || 'scan') }}
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
         run: go run .
 

@@ -4,11 +4,11 @@ Detects systemic anomalies across the gofiber org and posts them to a Discord
 channel. Runs from `.github/workflows/org-health.yml` in two modes:
 
 - **scan** (every 30 minutes): default-branch workflows that flipped from
-  green to red (edge-triggered, classified as plain failure, same-SHA flip,
-  or scheduled run without new commits), workflows that cannot start
+  green to red or to a timeout (edge-triggered, classified as plain failure,
+  same-SHA flip, or scheduled run without new commits), workflows that cannot start
   (`startup_failure`), and workflows failing across several distinct PRs at
   once (cross-PR correlation).
-- **digest** (daily, 08:00 UTC): PR/issue backlog over thresholds, PRs without
+- **digest** (daily, 08:15 UTC): PR/issue backlog over thresholds, PRs without
   review, issues without any answer, issue spikes (24h vs 14-day average),
   and scheduled workflows GitHub disabled for inactivity.
 
@@ -59,8 +59,8 @@ never match, so exceptions cannot accumulate silently. Check names:
 
 - Failure alerts fire on the green-to-red transition only; an already-red
   workflow stays silent.
-- Every finding key has a 72h cooldown (`cooldownHours`), persisted in
-  `state.json` via actions/cache.
+- Every finding key has a 72h cooldown (`cooldownHours`, overridable per repo),
+  persisted in `state.json` via actions/cache.
 - The digest is a single message; scan alerts are batched into one message
   with at most 10 embeds.
 - Dry runs do not touch the state, so they never consume a cooldown.

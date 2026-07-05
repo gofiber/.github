@@ -30,6 +30,15 @@ func TestDetectBranchFailuresEdgeTriggered(t *testing.T) {
 			run(2, 1, "main", "bbb", "push", "failure"),
 			run(1, 1, "main", "aaa", "push", "success"),
 		}, 1},
+		{"green to timeout fires", []workflowRun{
+			run(2, 1, "main", "bbb", "push", "timed_out"),
+			run(1, 1, "main", "aaa", "push", "success"),
+		}, 1},
+		{"still timing out stays silent", []workflowRun{
+			run(3, 1, "main", "ccc", "push", "timed_out"),
+			run(2, 1, "main", "bbb", "push", "timed_out"),
+			run(1, 1, "main", "aaa", "push", "success"),
+		}, 0},
 		{"still red stays silent", []workflowRun{
 			run(3, 1, "main", "ccc", "push", "failure"),
 			run(2, 1, "main", "bbb", "push", "failure"),
@@ -41,6 +50,15 @@ func TestDetectBranchFailuresEdgeTriggered(t *testing.T) {
 		}, 0},
 		{"first run ever red stays silent", []workflowRun{
 			run(1, 1, "main", "aaa", "push", "failure"),
+		}, 0},
+		{"cancelled run does not mask the edge", []workflowRun{
+			run(3, 1, "main", "ccc", "push", "failure"),
+			run(2, 1, "main", "bbb", "push", "cancelled"),
+			run(1, 1, "main", "aaa", "push", "success"),
+		}, 1},
+		{"fork PR on a branch named main is not default-branch signal", []workflowRun{
+			run(2, 1, "main", "bbb", "pull_request", "failure"),
+			run(1, 1, "main", "aaa", "push", "success"),
 		}, 0},
 	}
 	for _, tc := range cases {
@@ -216,15 +234,36 @@ func TestExcludeRepos(t *testing.T) {
 func TestFilterAlertedCooldown(t *testing.T) {
 	s := &State{Alerted: map[string]time.Time{}}
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
-	f := []Finding{{Key: "storage/cross-pr/7"}}
+	f := []Finding{{Repo: "storage", Key: "storage/cross-pr/7"}}
+	const72 := func(string) time.Duration { return 72 * time.Hour }
 
-	if got := s.filterAlerted(f, 72*time.Hour, now); len(got) != 1 {
+	if got := s.filterAlerted(f, const72, now); len(got) != 1 {
 		t.Fatal("first occurrence must pass")
 	}
-	if got := s.filterAlerted(f, 72*time.Hour, now.Add(time.Hour)); len(got) != 0 {
+	if got := s.filterAlerted(f, const72, now.Add(time.Hour)); len(got) != 0 {
 		t.Fatal("repeat within cooldown must be dropped")
 	}
-	if got := s.filterAlerted(f, 72*time.Hour, now.Add(73*time.Hour)); len(got) != 1 {
+	if got := s.filterAlerted(f, const72, now.Add(73*time.Hour)); len(got) != 1 {
 		t.Fatal("after cooldown it may fire again")
+	}
+}
+
+func TestFilterAlertedPerRepoCooldown(t *testing.T) {
+	s := &State{Alerted: map[string]time.Time{}}
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	// storage is given a short 1h window, everything else the 72h default.
+	cooldownFor := func(repo string) time.Duration {
+		if repo == "storage" {
+			return time.Hour
+		}
+		return 72 * time.Hour
+	}
+	f := []Finding{{Repo: "storage", Key: "storage/x"}}
+
+	if got := s.filterAlerted(f, cooldownFor, now); len(got) != 1 {
+		t.Fatal("first occurrence must pass")
+	}
+	if got := s.filterAlerted(f, cooldownFor, now.Add(2*time.Hour)); len(got) != 1 {
+		t.Fatal("storage's per-repo 1h cooldown must let it fire again after 2h")
 	}
 }
