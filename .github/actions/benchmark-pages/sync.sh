@@ -13,9 +13,19 @@ MARKER="gofiber-benchmark-redirect"
 cd "$CHECKOUT_DIR"
 mkdir -p "$DATA_DIR"
 
+# One data.js per package (storage) or a single data.js next to the page?
+if compgen -G "$DATA_DIR/*/data.js" > /dev/null; then
+  LAYOUT=multi
+else
+  LAYOUT=single
+fi
+
 # The shared page is always overwritten so central changes propagate on the
-# next benchmark run of every repository.
+# next benchmark run of every repository. Baking the layout in spares the page
+# a probing folders.json request that logs a 404 on single-layout repos.
 cp "$ACTION_DIR/index.html" "$DATA_DIR/index.html"
+sed -i.sync-bak "s/<body data-layout=\"auto\">/<body data-layout=\"$LAYOUT\">/" "$DATA_DIR/index.html"
+rm -f "$DATA_DIR/index.html.sync-bak"
 
 # Writes a redirect page, but never clobbers a hand-crafted file: the target
 # is only (re)written when it is missing, carries our marker, or - when
@@ -36,7 +46,7 @@ write_redirect index.html "./${DATA_DIR}/"
 
 # Multi-folder layout (one data.js per package): refresh folders.json and turn
 # the per-package stock pages into stubs that preselect the package filter.
-if compgen -G "$DATA_DIR/*/data.js" > /dev/null; then
+if [[ "$LAYOUT" == multi ]]; then
   find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
     | jq -R -s -c 'split("\n") | map(select(length > 0)) | sort' > "$DATA_DIR/folders.json"
   while IFS= read -r pkg; do
