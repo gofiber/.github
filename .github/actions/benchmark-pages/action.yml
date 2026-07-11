@@ -1,0 +1,30 @@
+name: benchmark-pages
+description: >-
+  Sync the shared benchmark page, the root redirect and (for multi-folder
+  layouts) folders.json plus per-package redirect stubs to the gh-pages branch.
+
+inputs:
+  data-dir:
+    description: Directory on the gh-pages branch that holds the benchmark data
+    required: false
+    default: benchmarks
+  token:
+    description: Token used to push to the gh-pages branch
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout gh-pages
+      uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      with:
+        ref: gh-pages
+        path: .benchmark-pages-sync
+        token: ${{ inputs.token }}
+
+    - name: Sync Page Assets
+      shell: bash
+      env:
+        DATA_DIR: ${{ inputs.data-dir }}
+      run: bash "${{ github.action_path }}/sync.sh" .benchmark-pages-sync
