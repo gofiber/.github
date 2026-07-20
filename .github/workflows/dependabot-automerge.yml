@@ -51,8 +51,18 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
+      # github_actions majors automerge too, except glue actions whose outputs feed
+      # other jobs and which never run in PR CI - their majors stay manual.
       - name: Enable auto-merge for Dependabot PRs
-        if: ${{steps.metadata.outputs.update-type == 'version-update:semver-minor' || steps.metadata.outputs.update-type == 'version-update:semver-patch'}}
+        if: >-
+          ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
+              steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+              (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
+               steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+               !contains(steps.metadata.outputs.dependency-names, 'dorny/paths-filter') &&
+               !contains(steps.metadata.outputs.dependency-names, 'dependabot/fetch-metadata') &&
+               !contains(steps.metadata.outputs.dependency-names, 'poseidon/wait-for-status-checks') &&
+               !contains(steps.metadata.outputs.dependency-names, 'release-drafter/release-drafter')) }}
         run: |
           gh pr review --approve "$PR_URL"
           gh pr merge --auto --merge "$PR_URL"
