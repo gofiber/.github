@@ -1,9 +1,14 @@
-_extends: gofiber/.github:release-drafter.yml
+_extends:
+  from: gofiber/.github:release-drafter.yml
+  strategy:
+    categories: append
 name-template: '{{MODULE}} - v$RESOLVED_VERSION'
 tag-template: '{{MODULE}}/v$RESOLVED_VERSION'
 tag-prefix: {{MODULE}}/v
-include-paths:
-  - {{MODULE}}
+categories:
+  - type: pre-include
+    when:
+      path: '{{MODULE}}/**'
 template: |
     $CHANGES
 

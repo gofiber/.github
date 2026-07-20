@@ -2,46 +2,44 @@ name-template: 'v$RESOLVED_VERSION'
 tag-template: 'v$RESOLVED_VERSION'
 categories:
   - title: '❗ Breaking Changes'
-    labels:
-      - '❗ BreakingChange'
+    when:
+      label: '❗ BreakingChange'
   - title: '🚀 New'
-    labels:
-      - '✏️ Feature'
-      - '📝 Proposal'
+    when:
+      labels:
+        - '✏️ Feature'
+        - '📝 Proposal'
   - title: '🧹 Updates'
-    labels:
-      - '🧹 Updates'
-      - '⚡️ Performance'
+    when:
+      labels:
+        - '🧹 Updates'
+        - '⚡️ Performance'
   - title: '🐛 Fixes'
-    labels:
-      - '☢️ Bug'
+    when:
+      label: '☢️ Bug'
   - title: '🛠️ Maintenance'
-    labels:
-      - '🤖 Dependencies'
     collapse-after: 0
+    when:
+      label: '🤖 Dependencies'
   - title: '📚 Documentation'
-    labels:
-      - '📒 Documentation'
+    when:
+      label: '📒 Documentation'
+  # version resolution (faithful port of the old version-resolver block)
+  - type: version-resolver
+    semver-increment: major
+    when:
+      label: '❗ BreakingChange'
+  - type: version-resolver
+    semver-increment: minor
+    when:
+      label: '✏️ Feature'
+  - type: version-resolver
+    semver-increment: patch
 change-template: '- $TITLE (#$NUMBER)'
 change-title-escapes: '\<*_&'
 exclude-contributors:
   - dependabot
   - dependabot[bot]
-version-resolver:
-  major:
-    labels:
-      - '❗ BreakingChange'
-  minor:
-    labels:
-      - '✏️ Feature'
-  patch:
-    labels:
-      - '📒 Documentation'
-      - '☢️ Bug'
-      - '🤖 Dependencies'
-      - '🧹 Updates'
-      - '⚡️ Performance'
-  default: patch
 template: |
     $CHANGES
 
