@@ -114,6 +114,9 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ inputs.go-version }}
+          # resolve the newest matching patch instead of whatever the runner image
+          # happens to cache; a module's go directive can outrun it (see mssql)
+          check-latest: true
           # per-module cache key for matrix legs; all modules for the loop mode
           cache-dependency-path: ${{ inputs.multi-module && '**/go.sum' || format('{0}/go.sum', inputs.working-directory) }}
 
