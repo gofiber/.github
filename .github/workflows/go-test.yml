@@ -11,7 +11,7 @@ on:
       platforms:
         description: JSON array of platforms to test against
         required: false
-        default: '["ubuntu-latest", "windows-latest", "macos-latest"]'
+        default: '["blacksmith-4vcpu-ubuntu-2404", "blacksmith-4vcpu-windows-2025", "blacksmith-6vcpu-macos-latest"]'
         type: string
       working-directory:
         description: Path to the module to test
@@ -91,7 +91,7 @@ jobs:
           args: -race -count=1 -coverprofile=coverage.txt -covermode=atomic -shuffle=on
 
       - name: Upload coverage reports to Codecov
-        if: ${{ inputs.enable-codecov && matrix.platform == 'ubuntu-latest' }}
+        if: ${{ inputs.enable-codecov && runner.os == 'Linux' }}
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.codecov-token }}
@@ -102,7 +102,7 @@ jobs:
 
   repeated:
     if: inputs.enable-repeated == true
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - name: Fetch Repository

@@ -32,7 +32,7 @@ permissions:
 jobs:
   govulncheck:
     if: inputs.run-govulncheck == true
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     env:
       GO111MODULE: on
@@ -59,7 +59,7 @@ jobs:
 
   codeql:
     if: inputs.run-codeql == true
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 30
     permissions:
       contents: read

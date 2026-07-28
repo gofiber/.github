@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   changes:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     outputs:
       packages: ${{ steps.set-packages.outputs.packages }}
@@ -121,7 +121,7 @@ jobs:
     if: needs.changes.outputs.packages != '[]'
     name: "lint (${{ matrix.package }})"
     needs: changes
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
