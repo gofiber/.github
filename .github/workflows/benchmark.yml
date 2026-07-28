@@ -91,6 +91,15 @@ on:
         required: false
         default: 30
         type: number
+      shards:
+        description: >-
+          Run the benchmarks in this many parallel jobs and merge their output before
+          anything is compared or published. Downstream sees one combined result file,
+          so the split is invisible to github-action-benchmark and to the charts.
+          1 keeps everything in a single job. Not supported with multi-module.
+        required: false
+        default: 1
+        type: number
 
 permissions:
   # deployments permission to deploy GitHub pages website
@@ -101,14 +110,60 @@ permissions:
   pull-requests: write
 
 jobs:
+  # A matrix needs a literal list and expressions have no range(), so the shard
+  # indices are generated here. Skipped entirely for an unsharded run.
+  plan:
+    if: inputs.shards > 1
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.gen.outputs.shards }}
+    steps:
+      - name: Generate shard indices
+        id: gen
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          set -euo pipefail
+          if [[ "${SHARDS}" -gt 64 ]]; then
+            echo "shards=${SHARDS} is beyond anything sensible; cap it in the caller" >&2
+            exit 1
+          fi
+          list="$(seq 0 $((SHARDS - 1)) | jq -sRc 'split("\n") | map(select(length > 0) | tonumber)')"
+          echo "shards=${list}" >> "$GITHUB_OUTPUT"
+          echo "Sharding across ${SHARDS} jobs: ${list}" >> "$GITHUB_STEP_SUMMARY"
+
   benchmark:
+    needs: plan
+    # plan is skipped for an unsharded run, which would cascade to this job
+    if: ${{ !cancelled() && !failure() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # falls back to a single nameless leg when plan did not run
+        shard: ${{ fromJson(needs.plan.outputs.shards || '[0]') }}
     runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
+      - name: Reject unsupported combination
+        if: ${{ inputs.multi-module && inputs.shards > 1 }}
+        shell: bash
+        run: |
+          echo "::error::shards > 1 is not supported together with multi-module" >&2
+          exit 1
+
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # to be able to resolve the default branch head
+
+      - name: Checkout central scripts
+        if: inputs.shards > 1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gofiber/.github
+          path: .central
 
       - name: Install Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -148,7 +203,7 @@ jobs:
           done
 
       - name: Run Benchmarks
-        if: ${{ !inputs.multi-module }}
+        if: ${{ !inputs.multi-module && inputs.shards <= 1 }}
         shell: bash
         working-directory: ${{ inputs.working-directory }}
         env:
@@ -158,162 +213,139 @@ jobs:
           # shellcheck disable=SC2086 # GO_TEST_FLAGS is intentionally word-split
           go test ./... -benchmem -run=^$ -bench . $GO_TEST_FLAGS | tee "$GITHUB_WORKSPACE/output.txt"
 
-      - name: Remove Parallel Benchmarks
-        if: inputs.filter-parallel
+      # One `go test` per package rather than a single run over ./...: benchmark names
+      # are not unique across packages, so a shard's combined regex would match the
+      # same name in a package that belongs to a different shard and measure it twice.
+      - name: Run Benchmarks (shard)
+        if: ${{ !inputs.multi-module && inputs.shards > 1 }}
         shell: bash
-        run: |
-          awk '!/^Benchmark.*_Parallel/' output.txt > output_filtered.txt
-          mv output_filtered.txt output.txt
-
-      # github-action-benchmark reads every Go metric as smaller-is-better, so a throughput gain
-      # shows up as a regression. Alerting runs on a copy without MB/s, the charts keep them.
-      - name: Build Alert Input
-        shell: bash
+        working-directory: ${{ inputs.working-directory }}
         env:
-          ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
+          GO_TEST_FLAGS: ${{ inputs.go-test-flags }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ inputs.shards }}
         run: |
           set -euo pipefail
-          sed -E 's/[[:space:]]+[0-9.]+[[:space:]]+MB\/s//' output.txt \
-            | awk -v min="${ALERT_MIN_NS}" '
-                min <= 0 { print; next }
-                /ns\/op/ { for (i = 1; i < NF; i++) if ($(i + 1) == "ns/op" && $i + 0 < min) next }
-                { print }
-              ' > output_alert.txt
+          go test -list '^Benchmark' ./... > bench-list.txt
+          python3 "$GITHUB_WORKSPACE/.central/.github/scripts/shard_benchmarks.py" \
+            < bench-list.txt > bench-plan.txt
+          : > "$GITHUB_WORKSPACE/output.txt"
+          while read -r pkg pattern; do
+            [ -n "$pkg" ] || continue
+            # shellcheck disable=SC2086 # GO_TEST_FLAGS is intentionally word-split
+            go test -benchmem -run=^$ -bench "$pattern" $GO_TEST_FLAGS "$pkg" \
+              | tee -a "$GITHUB_WORKSPACE/output.txt"
+          done < bench-plan.txt
 
-      # NOTE: Benchmarks could change with different CPU types
-      - name: Check Runner CPU
-        id: cpu
+      - name: Record shard result
+        if: inputs.shards > 1
+        id: shard-result
         shell: bash
         env:
-          WANTED_CPU: ${{ inputs.pages-cpu-model }}
-        run: |
-          set -euo pipefail
-          CPU_MODEL="$(lscpu | awk -F': *' '/^Model name/ { print $2; exit }')"
-          echo "model=${CPU_MODEL}" >> "$GITHUB_OUTPUT"
-          echo "Runner CPU: ${CPU_MODEL}, $(nproc) cores" >> "$GITHUB_STEP_SUMMARY"
-          HAVE="$(printf '%s' "${CPU_MODEL}" | tr '[:upper:]' '[:lower:]')"
-          WANT="$(printf '%s' "${WANTED_CPU}" | tr '[:upper:]' '[:lower:]')"
-          if [[ -z "${WANT}" || "${HAVE}" == *"${WANT}"* ]]; then
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "Publish skipped, gh-pages is pinned to '${WANTED_CPU}'." >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::gh-pages publish skipped, runner CPU '${CPU_MODEL}' is not the pinned '${WANTED_CPU}'"
-          fi
-
-      - name: Get Default branch SHA
-        id: base-sha
-        shell: bash
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          SHA="$(git ls-remote origin "${DEFAULT_BRANCH}" | awk 'NR==1 {print $1}')"
-          if [[ -z "${SHA}" ]]; then
-            echo "Failed to resolve SHA for default branch '${DEFAULT_BRANCH}'" >&2
-            exit 1
-          fi
-          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-
-      - name: Build Cache Key
-        id: cache-key
-        shell: bash
-        env:
-          CPU_MODEL: ${{ steps.cpu.outputs.model }}
-          BASE_SHA: ${{ steps.base-sha.outputs.sha }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
         run: |
           set -euo pipefail
-          SAFE_CPU_MODEL="$(printf '%s' "$CPU_MODEL" | tr -cs '[:alnum:]._-' '-')"
-          SAFE_CPU_MODEL="${SAFE_CPU_MODEL#-}"
-          SAFE_CPU_MODEL="${SAFE_CPU_MODEL%-}"
-          WD_SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
-          # The SHA sits at the end so restore-keys can fall back to the newest
-          # cache of the same OS/CPU/module when the exact SHA has no cache yet.
-          echo "prefix=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
-          echo "key=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          # the reporting job never touches a benchmark runner, so it is told which
+          # CPU produced the numbers instead of reading its own
+          lscpu | awk -F': *' '/^Model name/ { print $2; exit }' > cpu.txt
+          SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
 
-      - name: Get Benchmark Results from Default branch
-        id: cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Upload shard output
+        if: inputs.shards > 1
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          path: ./cache
-          key: ${{ steps.cache-key.outputs.key }}
-          restore-keys: ${{ steps.cache-key.outputs.prefix }}
+          name: benchmark-${{ steps.shard-result.outputs.slug }}-shard-${{ matrix.shard }}
+          path: |
+            output.txt
+            cpu.txt
+          retention-days: 1
+          if-no-files-found: error
 
-      - name: Note Missing Baseline
-        if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key == ''
+      - name: Report Results
+        if: inputs.shards <= 1
+        uses: gofiber/.github/.github/actions/benchmark-report@main
+        with:
+          filter-parallel: ${{ inputs.filter-parallel }}
+          alert-min-ns: ${{ inputs.alert-min-ns }}
+          alert-threshold: ${{ inputs.alert-threshold }}
+          go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+          max-items-in-chart: ${{ inputs.max-items-in-chart }}
+          benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
+          pages-cpu-model: ${{ inputs.pages-cpu-model }}
+          working-directory: ${{ inputs.working-directory }}
+          sync-pages: ${{ inputs.sync-pages }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Merges the shards back into a single output file, so everything downstream runs
+  # against exactly what an unsharded run would have produced.
+  report:
+    if: ${{ inputs.shards > 1 && !cancelled() && !failure() }}
+    needs: benchmark
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    steps:
+      - name: Fetch Repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # to be able to resolve the default branch head
+
+      - name: Build artifact prefix
+        id: prefix
         shell: bash
         env:
-          CPU_MODEL: ${{ steps.cpu.outputs.model }}
-        run: echo "No cached baseline for CPU '${CPU_MODEL}', PR comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+          SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
+          echo "value=benchmark-${SLUG}-shard-" >> "$GITHUB_OUTPUT"
 
-      # This will only run if we have Benchmark Results from the default branch
-      - name: Compare PR Benchmark Results with Default branch
-        if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key != ''
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+      - name: Download shard outputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          tool: go
-          output-file-path: output_alert.txt
-          external-data-json-path: ./cache/benchmark-data.json
-          # Do not save the data (This allows comparing benchmarks)
-          save-data-file: false
-          fail-on-alert: true
-          # Comment on the PR if the branch is not a fork
-          comment-on-alert: ${{ github.event.pull_request.head.repo.fork == false }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          summary-always: true
+          pattern: ${{ steps.prefix.outputs.value }}*
+          path: shards
+
+      - name: Merge shard outputs
+        id: merge
+        shell: bash
+        env:
+          SHARDS: ${{ inputs.shards }}
+        run: |
+          set -euo pipefail
+          found=$(find shards -mindepth 1 -maxdepth 1 -type d | wc -l)
+          if [[ "${found}" -ne "${SHARDS}" ]]; then
+            echo "::error::expected ${SHARDS} shard artifacts, found ${found}" >&2
+            exit 1
+          fi
+          # sorted so the merged file is reproducible run to run
+          find shards -name output.txt | sort | xargs cat > output.txt
+          if [[ ! -s output.txt ]]; then
+            echo "::error::merged benchmark output is empty" >&2
+            exit 1
+          fi
+          echo "Merged ${found} shards, $(grep -c '^Benchmark' output.txt) benchmark results" \
+            >> "$GITHUB_STEP_SUMMARY"
+          # all shards should sit on the same CPU model; if they do not, the numbers
+          # in this one data point come from different hardware and that must be visible
+          mapfile -t models < <(find shards -name cpu.txt | sort | xargs cat | sort -u)
+          if [[ "${#models[@]}" -gt 1 ]]; then
+            echo "::warning::shards ran on different CPUs: ${models[*]}"
+            echo "Shards ran on different CPUs: ${models[*]}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "cpu=${models[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Report Results
+        uses: gofiber/.github/.github/actions/benchmark-report@main
+        with:
+          cpu-model: ${{ steps.merge.outputs.cpu }}
+          filter-parallel: ${{ inputs.filter-parallel }}
+          alert-min-ns: ${{ inputs.alert-min-ns }}
           alert-threshold: ${{ inputs.alert-threshold }}
           go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
-
-      - name: Store Benchmark Results for Default branch
-        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
-        with:
-          tool: go
-          # Same shape as the compare step reads, the cache is only ever used as its baseline
-          output-file-path: output_alert.txt
-          external-data-json-path: ./cache/benchmark-data.json
-          # Save the data to external file (cache)
-          save-data-file: true
-          # The compare step only reads the newest entry; without this cap the
-          # cache would grow on every push because restore-keys seed it with the
-          # previous cache content.
-          max-items-in-chart: 1
-          fail-on-alert: false
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          summary-always: true
-          alert-threshold: ${{ inputs.alert-threshold }}
-          go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
-
-      - name: Publish Benchmark Results to GitHub Pages
-        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.publish == 'true'
-        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
-        with:
-          tool: go
-          output-file-path: output.txt
-          benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
-          fail-on-alert: false
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          # Regressions that reach the default branch still leave a visible trace
-          comment-on-alert: true
-          summary-always: true
-          # Save the data to external file (GitHub Pages)
-          save-data-file: true
           max-items-in-chart: ${{ inputs.max-items-in-chart }}
-          alert-threshold: ${{ inputs.alert-threshold }}
-          go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
-          auto-push: true
-
-      - name: Update Benchmark Results cache
-        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ./cache
-          key: ${{ steps.cache-key.outputs.key }}
-
-      - name: Sync Benchmark Page
-        if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && inputs.sync-pages
-        uses: gofiber/.github/.github/actions/benchmark-pages@main
-        with:
-          data-dir: ${{ inputs.benchmark-data-dir-path }}
+          benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
+          pages-cpu-model: ${{ inputs.pages-cpu-model }}
+          working-directory: ${{ inputs.working-directory }}
+          sync-pages: ${{ inputs.sync-pages }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}

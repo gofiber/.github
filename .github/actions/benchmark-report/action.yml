@@ -1,0 +1,228 @@
+name: benchmark-report
+description: >-
+  Turns a raw `go test -bench` output file into the alert comparison, the stored
+  baseline and the gh-pages publish. Split out of the benchmark workflow so the
+  single-job run and the merged sharded run go through identical logic.
+
+inputs:
+  output-file:
+    description: Raw benchmark output to process
+    required: false
+    default: output.txt
+  cpu-model:
+    description: >-
+      CPU the benchmarks actually ran on. Sharded runs pass the model reported by
+      the shards; left empty the action reads the CPU of the runner it runs on.
+    required: false
+    default: ''
+  filter-parallel:
+    description: Drop Benchmark*_Parallel results before processing
+    required: false
+    default: 'false'
+  alert-min-ns:
+    description: Drop benchmarks faster than this many ns/op from the alert comparison
+    required: false
+    default: '1'
+  alert-threshold:
+    description: Regression threshold at which an alert is raised
+    required: false
+    default: '150%'
+  go-force-package-suffix:
+    description: Always append the Go package to the benchmark names
+    required: false
+    default: 'false'
+  max-items-in-chart:
+    description: Number of runs kept in the gh-pages data.js
+    required: true
+  benchmark-data-dir-path:
+    description: Directory on the gh-pages branch where the benchmark data is stored
+    required: false
+    default: benchmarks
+  pages-cpu-model:
+    description: Publish to gh-pages only when the runner CPU contains this string
+    required: false
+    default: ''
+  working-directory:
+    description: Module directory the benchmarks belong to, used in the cache key
+    required: false
+    default: '.'
+  sync-pages:
+    description: Sync the shared benchmark page to gh-pages after publishing
+    required: false
+    default: 'true'
+  github-token:
+    description: Token used for comments, cache and the gh-pages push
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Remove Parallel Benchmarks
+      if: inputs.filter-parallel == 'true'
+      shell: bash
+      env:
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        awk '!/^Benchmark.*_Parallel/' "$OUTPUT_FILE" > output_filtered.txt
+        mv output_filtered.txt "$OUTPUT_FILE"
+
+    # github-action-benchmark reads every Go metric as smaller-is-better, so a throughput gain
+    # shows up as a regression. Alerting runs on a copy without MB/s, the charts keep them.
+    - name: Build Alert Input
+      shell: bash
+      env:
+        ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        set -euo pipefail
+        sed -E 's/[[:space:]]+[0-9.]+[[:space:]]+MB\/s//' "$OUTPUT_FILE" \
+          | awk -v min="${ALERT_MIN_NS}" '
+              min <= 0 { print; next }
+              /ns\/op/ { for (i = 1; i < NF; i++) if ($(i + 1) == "ns/op" && $i + 0 < min) next }
+              { print }
+            ' > output_alert.txt
+
+    # NOTE: Benchmarks could change with different CPU types
+    - name: Check Runner CPU
+      id: cpu
+      shell: bash
+      env:
+        WANTED_CPU: ${{ inputs.pages-cpu-model }}
+        GIVEN_CPU: ${{ inputs.cpu-model }}
+      run: |
+        set -euo pipefail
+        # A merged sharded run is reported from a job that did not benchmark anything,
+        # so the model is handed in; otherwise read the runner we are sitting on.
+        if [[ -n "${GIVEN_CPU}" ]]; then
+          CPU_MODEL="${GIVEN_CPU}"
+        else
+          CPU_MODEL="$(lscpu | awk -F': *' '/^Model name/ { print $2; exit }')"
+        fi
+        echo "model=${CPU_MODEL}" >> "$GITHUB_OUTPUT"
+        echo "Benchmark CPU: ${CPU_MODEL}" >> "$GITHUB_STEP_SUMMARY"
+        HAVE="$(printf '%s' "${CPU_MODEL}" | tr '[:upper:]' '[:lower:]')"
+        WANT="$(printf '%s' "${WANTED_CPU}" | tr '[:upper:]' '[:lower:]')"
+        if [[ -z "${WANT}" || "${HAVE}" == *"${WANT}"* ]]; then
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "publish=false" >> "$GITHUB_OUTPUT"
+          echo "Publish skipped, gh-pages is pinned to '${WANTED_CPU}'." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::gh-pages publish skipped, runner CPU '${CPU_MODEL}' is not the pinned '${WANTED_CPU}'"
+        fi
+
+    - name: Get Default branch SHA
+      id: base-sha
+      shell: bash
+      env:
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      run: |
+        set -euo pipefail
+        SHA="$(git ls-remote origin "${DEFAULT_BRANCH}" | awk 'NR==1 {print $1}')"
+        if [[ -z "${SHA}" ]]; then
+          echo "Failed to resolve SHA for default branch '${DEFAULT_BRANCH}'" >&2
+          exit 1
+        fi
+        echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+
+    - name: Build Cache Key
+      id: cache-key
+      shell: bash
+      env:
+        CPU_MODEL: ${{ steps.cpu.outputs.model }}
+        BASE_SHA: ${{ steps.base-sha.outputs.sha }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+      run: |
+        set -euo pipefail
+        SAFE_CPU_MODEL="$(printf '%s' "$CPU_MODEL" | tr -cs '[:alnum:]._-' '-')"
+        SAFE_CPU_MODEL="${SAFE_CPU_MODEL#-}"
+        SAFE_CPU_MODEL="${SAFE_CPU_MODEL%-}"
+        WD_SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
+        # The SHA sits at the end so restore-keys can fall back to the newest
+        # cache of the same OS/CPU/module when the exact SHA has no cache yet.
+        echo "prefix=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
+        echo "key=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}" >> "$GITHUB_OUTPUT"
+
+    - name: Get Benchmark Results from Default branch
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ./cache
+        key: ${{ steps.cache-key.outputs.key }}
+        restore-keys: ${{ steps.cache-key.outputs.prefix }}
+
+    - name: Note Missing Baseline
+      if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key == ''
+      shell: bash
+      env:
+        CPU_MODEL: ${{ steps.cpu.outputs.model }}
+      run: echo "No cached baseline for CPU '${CPU_MODEL}', PR comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+
+    # This will only run if we have Benchmark Results from the default branch
+    - name: Compare PR Benchmark Results with Default branch
+      if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key != ''
+      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+      with:
+        tool: go
+        output-file-path: output_alert.txt
+        external-data-json-path: ./cache/benchmark-data.json
+        # Do not save the data (This allows comparing benchmarks)
+        save-data-file: false
+        fail-on-alert: true
+        # Comment on the PR if the branch is not a fork
+        comment-on-alert: ${{ github.event.pull_request.head.repo.fork == false }}
+        github-token: ${{ inputs.github-token }}
+        summary-always: true
+        alert-threshold: ${{ inputs.alert-threshold }}
+        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+
+    - name: Store Benchmark Results for Default branch
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+      with:
+        tool: go
+        # Same shape as the compare step reads, the cache is only ever used as its baseline
+        output-file-path: output_alert.txt
+        external-data-json-path: ./cache/benchmark-data.json
+        # Save the data to external file (cache)
+        save-data-file: true
+        # The compare step only reads the newest entry; without this cap the
+        # cache would grow on every push because restore-keys seed it with the
+        # previous cache content.
+        max-items-in-chart: 1
+        fail-on-alert: false
+        github-token: ${{ inputs.github-token }}
+        summary-always: true
+        alert-threshold: ${{ inputs.alert-threshold }}
+        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+
+    - name: Publish Benchmark Results to GitHub Pages
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.publish == 'true'
+      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
+      with:
+        tool: go
+        output-file-path: ${{ inputs.output-file }}
+        benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
+        fail-on-alert: false
+        github-token: ${{ inputs.github-token }}
+        # Regressions that reach the default branch still leave a visible trace
+        comment-on-alert: true
+        summary-always: true
+        # Save the data to external file (GitHub Pages)
+        save-data-file: true
+        max-items-in-chart: ${{ inputs.max-items-in-chart }}
+        alert-threshold: ${{ inputs.alert-threshold }}
+        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+        auto-push: true
+
+    - name: Update Benchmark Results cache
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ./cache
+        key: ${{ steps.cache-key.outputs.key }}
+
+    - name: Sync Benchmark Page
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && inputs.sync-pages == 'true'
+      uses: gofiber/.github/.github/actions/benchmark-pages@main
+      with:
+        data-dir: ${{ inputs.benchmark-data-dir-path }}
