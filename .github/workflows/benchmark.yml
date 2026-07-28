@@ -8,6 +8,15 @@ on:
         required: false
         default: 1.25.x
         type: string
+      runs-on:
+        description: >-
+          Runner label for the benchmark job. Defaults to the Blacksmith x64 pool for its higher
+          single-thread performance; GitHub's shared pool mixes four CPU models and moves the same
+          benchmark by up to 2.5x between them. 4 vCPU keeps GOMAXPROCS where the GitHub runners
+          had it. Use a *-arm label where the benchmarks need arm64.
+        required: false
+        default: blacksmith-4vcpu-ubuntu-2404
+        type: string
       multi-module:
         description: Run the benchmarks of every top-level directory that contains a go.mod (multi-module repos)
         required: false
@@ -55,12 +64,12 @@ on:
       pages-cpu-model:
         description: >-
           Publish to gh-pages only when the runner CPU contains this string (case-insensitive).
-          GitHub hands out several CPU models, publishing from all of them puts level shifts into
-          the chart history. Empty publishes from every runner. PR comparison is unaffected, it
-          always uses a baseline from the same CPU. If the pool ever drops this model the job
-          warns instead of publishing, then pick the new one from the warning.
+          Empty publishes from every runner. Left empty since the move to Blacksmith, whose CPU
+          model is undocumented; a stale pin would silently skip every publish instead. Each run
+          prints the model into the job summary, so pin it once the pool turns out to be mixed. PR
+          comparison is unaffected, its baseline cache is keyed by CPU either way.
         required: false
-        default: AMD EPYC 7763
+        default: ''
         type: string
       go-test-flags:
         description: Extra flags passed to go test
@@ -93,7 +102,7 @@ permissions:
 
 jobs:
   benchmark:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs-on }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     steps:
       - name: Fetch Repository
@@ -169,19 +178,16 @@ jobs:
               ' > output_alert.txt
 
       # NOTE: Benchmarks could change with different CPU types
-      - name: Get GitHub Runner System Information
-        uses: kenchan0130/actions-system-info@59699597e84e80085a750998045983daa49274c4 # v1.4.0
-        id: system-info
-
       - name: Check Runner CPU
         id: cpu
         shell: bash
         env:
-          CPU_MODEL: ${{ steps.system-info.outputs.cpu-model }}
           WANTED_CPU: ${{ inputs.pages-cpu-model }}
         run: |
           set -euo pipefail
-          echo "Runner CPU: ${CPU_MODEL}" >> "$GITHUB_STEP_SUMMARY"
+          CPU_MODEL="$(lscpu | awk -F': *' '/^Model name/ { print $2; exit }')"
+          echo "model=${CPU_MODEL}" >> "$GITHUB_OUTPUT"
+          echo "Runner CPU: ${CPU_MODEL}, $(nproc) cores" >> "$GITHUB_STEP_SUMMARY"
           HAVE="$(printf '%s' "${CPU_MODEL}" | tr '[:upper:]' '[:lower:]')"
           WANT="$(printf '%s' "${WANTED_CPU}" | tr '[:upper:]' '[:lower:]')"
           if [[ -z "${WANT}" || "${HAVE}" == *"${WANT}"* ]]; then
@@ -210,7 +216,7 @@ jobs:
         id: cache-key
         shell: bash
         env:
-          CPU_MODEL: ${{ steps.system-info.outputs.cpu-model }}
+          CPU_MODEL: ${{ steps.cpu.outputs.model }}
           BASE_SHA: ${{ steps.base-sha.outputs.sha }}
           WORKING_DIRECTORY: ${{ inputs.working-directory }}
         run: |
@@ -236,7 +242,7 @@ jobs:
         if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key == ''
         shell: bash
         env:
-          CPU_MODEL: ${{ steps.system-info.outputs.cpu-model }}
+          CPU_MODEL: ${{ steps.cpu.outputs.model }}
         run: echo "No cached baseline for CPU '${CPU_MODEL}', PR comparison skipped." >> "$GITHUB_STEP_SUMMARY"
 
       # This will only run if we have Benchmark Results from the default branch
