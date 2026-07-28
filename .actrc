@@ -1,0 +1,39 @@
+# Defaults for running the gofiber workflows locally with nektos/act.
+#
+# act reads .actrc from the current working directory and from $HOME, never from a
+# sibling checkout. To use this for another repo, copy it there or append it to
+# ~/.actrc:  cat .actrc >> ~/.actrc
+#
+# The vCPU count in a Blacksmith label only drives billing and speed, so every Linux
+# size maps to the same image. 24.04 because that is what the labels say.
+
+-P blacksmith-2vcpu-ubuntu-2404=catthehacker/ubuntu:act-24.04
+-P blacksmith-4vcpu-ubuntu-2404=catthehacker/ubuntu:act-24.04
+-P blacksmith-8vcpu-ubuntu-2404=catthehacker/ubuntu:act-24.04
+-P blacksmith-16vcpu-ubuntu-2404=catthehacker/ubuntu:act-24.04
+-P blacksmith-32vcpu-ubuntu-2404=catthehacker/ubuntu:act-24.04
+
+# The benchmark workflow documents *-arm labels as an option for arm64 benchmarks.
+-P blacksmith-4vcpu-ubuntu-2404-arm=catthehacker/ubuntu:act-24.04
+-P blacksmith-8vcpu-ubuntu-2404-arm=catthehacker/ubuntu:act-24.04
+
+# act cannot emulate Windows or macOS. These are Linux stand-ins so a matrix job at
+# least runs end to end; anything genuinely OS specific will not behave faithfully.
+# On a Mac, -P blacksmith-6vcpu-macos-latest=-self-hosted runs it on the host instead,
+# which is closer but escapes the container.
+-P blacksmith-4vcpu-windows-2025=catthehacker/ubuntu:act-24.04
+-P blacksmith-6vcpu-macos-latest=catthehacker/ubuntu:act-24.04
+
+# Release drafter, dependabot automerge and the sync jobs still use these.
+-P ubuntu-latest=catthehacker/ubuntu:act-latest
+-P windows-latest=catthehacker/ubuntu:act-24.04
+-P macos-latest=catthehacker/ubuntu:act-24.04
+
+# Every Blacksmith runner we use is x64. Without this act takes the host architecture
+# and Go builds target arm64 on Apple Silicon, which is not what CI does. Comment it
+# out when you want speed over fidelity.
+--container-architecture linux/amd64
+
+# benchmark.yml hands the shard results between jobs as artifacts; the upload and
+# download steps fail without a local artifact server.
+--artifact-server-path /tmp/act-artifacts
