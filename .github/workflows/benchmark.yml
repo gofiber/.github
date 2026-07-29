@@ -10,12 +10,13 @@ on:
         type: string
       runs-on:
         description: >-
-          Runner label for the benchmark job. Defaults to the Blacksmith x64 pool for its higher
-          single-thread performance; GitHub's shared pool mixes four CPU models and moves the same
-          benchmark by up to 2.5x between them. 4 vCPU keeps GOMAXPROCS where the GitHub runners
-          had it. Use a *-arm label where the benchmarks need arm64.
+          Runner label for the benchmark job. Defaults to the Blacksmith arm64 pool: the x64 pool
+          hands out AMD EPYC and Intel Xeon under one label and moves the same benchmark by up to
+          2x between them, which costs more comparisons than the faster x64 cores are worth. Use a
+          non-arm label where the benchmarks need x64, and expect the baseline to start over, the
+          cache key carries the CPU.
         required: false
-        default: blacksmith-4vcpu-ubuntu-2404
+        default: blacksmith-4vcpu-ubuntu-2404-arm
         type: string
       multi-module:
         description: Run the benchmarks of every top-level directory that contains a go.mod (multi-module repos)
@@ -64,10 +65,10 @@ on:
       pages-cpu-model:
         description: >-
           Publish to gh-pages only when the runner CPU contains this string (case-insensitive).
-          Empty publishes from every runner. Left empty since the move to Blacksmith, whose CPU
-          model is undocumented; a stale pin would silently skip every publish instead. Each run
-          prints the model into the job summary, so pin it once the pool turns out to be mixed. PR
-          comparison is unaffected, its baseline cache is keyed by CPU either way.
+          Empty publishes from every runner, which is what the arm64 default wants: pinning a
+          model that the pool later stops handing out would silently skip every publish. Pin it
+          only if the chart turns out to mix models. PR comparison is unaffected either way, its
+          baseline cache is keyed by hardware and a mixed run simply finds no baseline.
         required: false
         default: ''
         type: string
@@ -175,6 +176,34 @@ jobs:
           # per-module cache key for matrix legs; all modules for the loop mode
           cache-dependency-path: ${{ inputs.multi-module && '**/go.sum' || format('{0}/go.sum', inputs.working-directory) }}
 
+      # Everything the baseline depends on is decided here and nowhere else: both the
+      # sharded and the single-job path read BENCHMARK_CPU back out of the environment.
+      - name: Describe benchmark hardware
+        shell: bash
+        env:
+          RUNS_ON: ${{ inputs.runs-on }}
+        run: |
+          set -euo pipefail
+          # Blacksmith hands out a larger runner than the label promises whenever it has
+          # spare capacity, which moves GOMAXPROCS and every benchmark number with it
+          if [[ "$RUNS_ON" =~ -([0-9]+)vcpu- ]]; then
+            procs="${BASH_REMATCH[1]}"
+            echo "GOMAXPROCS=${procs}" >> "$GITHUB_ENV"
+          else
+            procs="$(nproc)"
+          fi
+          model="$(lscpu | awk -F': *' '/^Model name/ && !m { m = $2 } END { print m }')"
+          # arm64 carries no model name in /proc/cpuinfo and lscpu only decodes the part
+          # ids it ships a table for, so identify the core by its raw ids instead
+          if [[ -z "$model" ]]; then
+            model="$(uname -m) $(awk -F': *' '/^CPU implementer|^CPU part/ { print $2 }' \
+              /proc/cpuinfo | sort -u | tr '\n' ' ')"
+          fi
+          model="$(printf '%s' "$model" | sed 's/ *$//')"
+          echo "BENCHMARK_CPU=${model} (GOMAXPROCS=${procs})" >> "$GITHUB_ENV"
+          echo "Benchmark hardware: ${model} (GOMAXPROCS=${procs}, runner offers $(nproc))" \
+            >> "$GITHUB_STEP_SUMMARY"
+
       - name: Run Setup Script
         if: inputs.setup-script != ''
         shell: bash
@@ -246,8 +275,8 @@ jobs:
         run: |
           set -euo pipefail
           # the reporting job never touches a benchmark runner, so it is told which
-          # CPU produced the numbers instead of reading its own
-          lscpu | awk -F': *' '/^Model name/ { print $2; exit }' > cpu.txt
+          # hardware produced the numbers instead of reading its own
+          printf '%s\n' "$BENCHMARK_CPU" > cpu.txt
           SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
           echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
 
@@ -266,6 +295,7 @@ jobs:
         if: inputs.shards <= 1
         uses: gofiber/.github/.github/actions/benchmark-report@main
         with:
+          cpu-model: ${{ env.BENCHMARK_CPU }}
           filter-parallel: ${{ inputs.filter-parallel }}
           alert-min-ns: ${{ inputs.alert-min-ns }}
           alert-threshold: ${{ inputs.alert-threshold }}
@@ -326,14 +356,16 @@ jobs:
           fi
           echo "Merged ${found} shards, $(grep -c '^Benchmark' output.txt) benchmark results" \
             >> "$GITHUB_STEP_SUMMARY"
-          # all shards should sit on the same CPU model; if they do not, the numbers
-          # in this one data point come from different hardware and that must be visible
+          # all shards should sit on identical hardware; if they do not, the numbers in
+          # this one data point come from different machines and that must be visible
           mapfile -t models < <(find shards -name cpu.txt | sort | xargs cat | sort -u)
           if [[ "${#models[@]}" -gt 1 ]]; then
-            echo "::warning::shards ran on different CPUs: ${models[*]}"
-            echo "Shards ran on different CPUs: ${models[*]}" >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::shards ran on different hardware: ${models[*]}"
+            echo "Shards ran on different hardware: ${models[*]}" >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "cpu=${models[0]}" >> "$GITHUB_OUTPUT"
+          # every model goes into the key, so a mixed run cannot borrow the baseline of
+          # whichever model happens to sort first and report the difference as a regression
+          echo "cpu=$(IFS=+; printf '%s' "${models[*]}")" >> "$GITHUB_OUTPUT"
 
       - name: Report Results
         uses: gofiber/.github/.github/actions/benchmark-report@main
