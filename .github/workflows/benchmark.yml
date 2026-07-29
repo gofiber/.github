@@ -164,8 +164,6 @@ jobs:
 
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # to be able to resolve the default branch head
 
       - name: Checkout central scripts
         if: inputs.shards > 1
@@ -326,8 +324,6 @@ jobs:
     steps:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0 # to be able to resolve the default branch head
 
       - name: Build artifact prefix
         id: prefix
