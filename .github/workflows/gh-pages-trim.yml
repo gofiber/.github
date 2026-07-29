@@ -1,0 +1,84 @@
+name: Trim gh-pages history
+
+# gh-pages is a publish branch: its git history carries no information the
+# published files do not already contain, but every benchmark run adds another
+# full copy of data.js to it, which every full clone of the repo has to fetch.
+# This drops everything older than the retention window by rewriting the oldest
+# kept commit into a new root.
+
+on:
+  workflow_call:
+    inputs:
+      retention:
+        description: 'git date expression for the oldest commit to keep (e.g. "2 months ago")'
+        required: false
+        default: '2 months ago'
+        type: string
+      branch:
+        description: 'Branch to trim'
+        required: false
+        default: 'gh-pages'
+        type: string
+
+permissions:
+  contents: write
+
+# A scheduled run and a manual dispatch would race on the force-push.
+concurrency:
+  group: gh-pages-trim-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Trim history
+        env:
+          BRANCH: ${{ inputs.branch }}
+          RETENTION: ${{ inputs.retention }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if ! git ls-remote --exit-code --heads \
+            "https://github.com/${GITHUB_REPOSITORY}.git" "$BRANCH" >/dev/null 2>&1; then
+            echo "No $BRANCH branch, nothing to do."
+            exit 0
+          fi
+
+          git clone -q --branch "$BRANCH" --single-branch \
+            "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" repo
+          cd repo
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          BEFORE=$(git rev-parse HEAD)
+
+          # Newest commit already outside the window becomes the new root, so the
+          # window itself stays fully intact.
+          CUT=$(git rev-list -1 --before="$RETENTION" HEAD)
+          if [ -z "$CUT" ]; then
+            echo "Nothing older than '$RETENTION' ($(git rev-list --count HEAD) commits). Nothing to trim."
+            exit 0
+          fi
+          if [ "$CUT" = "$BEFORE" ]; then
+            echo "Every commit is outside the window, refusing to reduce $BRANCH to a single commit."
+            exit 0
+          fi
+          # Grafting a commit that is already parentless is a hard error in git,
+          # so a branch that has not moved since the last trim must bail out here.
+          if ! git rev-parse -q --verify "${CUT}^" >/dev/null 2>&1; then
+            echo "$BRANCH is already rooted at the cut-off. Nothing to trim."
+            exit 0
+          fi
+
+          echo "Commits before: $(git rev-list --count HEAD)"
+          git replace --graft "$CUT"
+          FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f -- "$BRANCH" >/dev/null
+          echo "Commits after:  $(git rev-list --count HEAD)"
+
+          # --force-with-lease so a benchmark run publishing right now is not
+          # silently discarded. Losing the race fails the job; the next run trims.
+          git push --force-with-lease="${BRANCH}:${BEFORE}" origin "$BRANCH"
+          echo "Trimmed $BRANCH to '$RETENTION'."
