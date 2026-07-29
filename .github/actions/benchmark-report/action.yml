@@ -28,9 +28,11 @@ inputs:
     required: false
     default: '150%'
   improve-threshold:
-    description: Improvement from which a result is worth reporting back
+    description: >-
+      Improvement from which a result is worth reporting back. Empty mirrors
+      alert-threshold, so both directions carry the same amount of noise.
     required: false
-    default: '110%'
+    default: ''
   go-force-package-suffix:
     description: Always append the Go package to the benchmark names
     required: false

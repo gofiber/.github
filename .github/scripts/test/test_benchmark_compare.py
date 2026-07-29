@@ -141,6 +141,22 @@ def test_report_lists_improvements_and_exit_code_only_follows_regressions():
         assert "Performance Alert" in report and "Regressions" in report, report
 
 
+def test_empty_improve_threshold_mirrors_the_alert_threshold():
+    # a 1.4x win must stay quiet when a 1.4x loss would not be believed either
+    faster = "pkg: p\nBenchmarkFast-4\t10\t71.00 ns/op\n"
+    slower = "pkg: p\nBenchmarkFast-4\t10\t100.00 ns/op\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        base, current, out = (f"{tmp}/{n}" for n in ("base.txt", "cur.txt", "out.md"))
+        pathlib.Path(base).write_text(slower, encoding="utf-8")
+        pathlib.Path(current).write_text(faster, encoding="utf-8")
+        argv = ["--base", base, "--current", current, "--out", out, "--threshold", "150%"]
+        compare.main(argv + ["--improve-threshold", ""])
+        assert "No significant change" in pathlib.Path(out).read_text(encoding="utf-8")
+        # an explicit value still wins over the mirror
+        compare.main(argv + ["--improve-threshold", "125%"])
+        assert "Improvement" in pathlib.Path(out).read_text(encoding="utf-8")
+
+
 def test_report_caps_the_table_so_the_comment_fits_github():
     many = "pkg: p\n" + "".join(f"Benchmark{i}-4\t10\t10.00 ns/op\n" for i in range(200))
     slow = "pkg: p\n" + "".join(f"Benchmark{i}-4\t10\t100.00 ns/op\n" for i in range(200))

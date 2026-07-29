@@ -143,8 +143,10 @@ def render(worse, better, threshold, improve_threshold, limit, hardware, notes):
 
 
 def factor(text):
-    """Accept both `150%` and `1.5`; awk would render either in the shell's locale."""
+    """Accept `150%`, `1.5` or empty; awk would render either in the shell's locale."""
     text = text.strip()
+    if not text:
+        return None
     return float(text[:-1]) / 100 if text.endswith("%") else float(text)
 
 
@@ -154,20 +156,21 @@ def main(argv=None):
     parser.add_argument("--current", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--threshold", type=factor, default=1.5)
-    parser.add_argument("--improve-threshold", type=factor, default=1.1)
+    # empty mirrors --threshold: an improvement is worth reporting exactly when a
+    # regression of the same size would be, so both directions carry the same noise
+    parser.add_argument("--improve-threshold", type=factor, default=None)
     parser.add_argument("--min-ns", type=float, default=1.0)
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--hardware", default="")
     args = parser.parse_args(argv)
+    improve_threshold = args.improve_threshold or args.threshold
 
     with open(args.base, encoding="utf-8") as handle:
         base, _ = parse(handle)
     with open(args.current, encoding="utf-8") as handle:
         current, duplicates = parse(handle)
 
-    worse, better = compare(
-        base, current, args.threshold, args.improve_threshold, args.min_ns
-    )
+    worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns)
 
     shared = len(current.keys() & base.keys())
     notes = [f"Compared {shared} of {len(current)} results against the base branch."]
@@ -179,8 +182,7 @@ def main(argv=None):
         notes.append(f":warning: {duplicates} result(s) were measured more than once.")
 
     report = render(
-        worse, better, args.threshold, args.improve_threshold, args.limit,
-        args.hardware, notes,
+        worse, better, args.threshold, improve_threshold, args.limit, args.hardware, notes
     )
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(report)

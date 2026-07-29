@@ -46,9 +46,12 @@ on:
         default: 150%
         type: string
       improve-threshold:
-        description: Improvement from which a result is reported back in the PR comment
+        description: >-
+          Improvement from which a result is reported back in the PR comment. Empty mirrors
+          alert-threshold: below the level at which a regression would be believed, an
+          "improvement" is just the runner-to-runner noise pointing the other way.
         required: false
-        default: 110%
+        default: ''
         type: string
       filter-parallel:
         description: Drop Benchmark*_Parallel results before processing
