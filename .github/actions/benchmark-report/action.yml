@@ -27,6 +27,10 @@ inputs:
     description: Regression threshold at which an alert is raised
     required: false
     default: '150%'
+  improve-threshold:
+    description: Improvement from which a result is worth reporting back
+    required: false
+    default: '110%'
   go-force-package-suffix:
     description: Always append the Go package to the benchmark names
     required: false
@@ -65,22 +69,6 @@ runs:
       run: |
         awk '!/^Benchmark.*_Parallel/' "$OUTPUT_FILE" > output_filtered.txt
         mv output_filtered.txt "$OUTPUT_FILE"
-
-    # github-action-benchmark reads every Go metric as smaller-is-better, so a throughput gain
-    # shows up as a regression. Alerting runs on a copy without MB/s, the charts keep them.
-    - name: Build Alert Input
-      shell: bash
-      env:
-        ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
-        OUTPUT_FILE: ${{ inputs.output-file }}
-      run: |
-        set -euo pipefail
-        sed -E 's/[[:space:]]+[0-9.]+[[:space:]]+MB\/s//' "$OUTPUT_FILE" \
-          | awk -v min="${ALERT_MIN_NS}" '
-              min <= 0 { print; next }
-              /ns\/op/ { for (i = 1; i < NF; i++) if ($(i + 1) == "ns/op" && $i + 0 < min) next }
-              { print }
-            ' > output_alert.txt
 
     # NOTE: Benchmarks could change with different CPU types
     - name: Check Runner CPU
@@ -139,8 +127,9 @@ runs:
         WD_SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
         # The SHA sits at the end so restore-keys can fall back to the newest
         # cache of the same OS/CPU/module when the exact SHA has no cache yet.
-        echo "prefix=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
-        echo "key=benchmark-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}" >> "$GITHUB_OUTPUT"
+        # v2 caches hold the raw benchmark output, v1 held a github-action-benchmark JSON.
+        echo "prefix=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
+        echo "key=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
     - name: Get Benchmark Results from Default branch
       id: cache
@@ -150,50 +139,86 @@ runs:
         key: ${{ steps.cache-key.outputs.key }}
         restore-keys: ${{ steps.cache-key.outputs.prefix }}
 
-    - name: Note Missing Baseline
-      if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key == ''
+    - name: Compare With Baseline
+      id: compare
       shell: bash
       env:
+        ALERT_THRESHOLD: ${{ inputs.alert-threshold }}
+        IMPROVE_THRESHOLD: ${{ inputs.improve-threshold }}
+        ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
         CPU_MODEL: ${{ steps.cpu.outputs.model }}
-      run: echo "No cached baseline for CPU '${CPU_MODEL}', PR comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [[ ! -f ./cache/baseline.txt ]]; then
+          echo "No cached baseline for CPU '${CPU_MODEL}', comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        status=0
+        python3 "${ACTION_PATH}/compare.py" \
+          --base ./cache/baseline.txt \
+          --current "$OUTPUT_FILE" \
+          --out report.md \
+          --threshold "$ALERT_THRESHOLD" \
+          --improve-threshold "$IMPROVE_THRESHOLD" \
+          --min-ns "$ALERT_MIN_NS" \
+          --hardware "$CPU_MODEL" || status=$?
+        # exit 1 means regressions, anything else means the script itself broke
+        if [[ "$status" -gt 1 ]]; then
+          exit "$status"
+        fi
+        cat report.md >> "$GITHUB_STEP_SUMMARY"
+        echo "compared=true" >> "$GITHUB_OUTPUT"
+        echo "regressed=$([[ "$status" -eq 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-    # This will only run if we have Benchmark Results from the default branch
-    - name: Compare PR Benchmark Results with Default branch
-      if: github.event_name == 'pull_request' && steps.cache.outputs.cache-matched-key != ''
-      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
-      with:
-        tool: go
-        output-file-path: output_alert.txt
-        external-data-json-path: ./cache/benchmark-data.json
-        # Do not save the data (This allows comparing benchmarks)
-        save-data-file: false
-        fail-on-alert: true
-        # Comment on the PR if the branch is not a fork
-        comment-on-alert: ${{ github.event.pull_request.head.repo.fork == false }}
-        github-token: ${{ inputs.github-token }}
-        summary-always: true
-        alert-threshold: ${{ inputs.alert-threshold }}
-        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+    # A PR is posted to unconditionally so the sticky comment drops its alert again
+    # once the regression is fixed; the default branch only reports actual problems.
+    - name: Post Benchmark Report
+      if: >-
+        steps.compare.outputs.compared == 'true'
+        && github.event.pull_request.head.repo.fork != true
+        && (github.event_name == 'pull_request' || steps.compare.outputs.regressed == 'true')
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        SHA: ${{ github.sha }}
+        # per module, so the matrix legs of a multi-package repo do not overwrite each other
+        MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
+      run: |
+        set -euo pipefail
+        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
+        if [[ -z "$PR" ]]; then
+          gh api -X POST "repos/${REPO}/commits/${SHA}/comments" -F body=@comment.md > /dev/null
+          exit 0
+        fi
+        # --jq runs per page, so emit every match and let tail pick the newest
+        id="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+          --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | tail -n1)"
+        if [[ -n "$id" ]]; then
+          gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F body=@comment.md > /dev/null
+        else
+          gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
+        fi
+
+    - name: Fail On Regression
+      if: steps.compare.outputs.regressed == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      run: |
+        echo "::error::benchmark regressions detected, see the job summary for the table"
+        exit 1
 
     - name: Store Benchmark Results for Default branch
       if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
-      with:
-        tool: go
-        # Same shape as the compare step reads, the cache is only ever used as its baseline
-        output-file-path: output_alert.txt
-        external-data-json-path: ./cache/benchmark-data.json
-        # Save the data to external file (cache)
-        save-data-file: true
-        # The compare step only reads the newest entry; without this cap the
-        # cache would grow on every push because restore-keys seed it with the
-        # previous cache content.
-        max-items-in-chart: 1
-        fail-on-alert: false
-        github-token: ${{ inputs.github-token }}
-        summary-always: true
-        alert-threshold: ${{ inputs.alert-threshold }}
-        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+      shell: bash
+      env:
+        OUTPUT_FILE: ${{ inputs.output-file }}
+      run: |
+        set -euo pipefail
+        mkdir -p ./cache
+        cp "$OUTPUT_FILE" ./cache/baseline.txt
 
     - name: Publish Benchmark Results to GitHub Pages
       if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.publish == 'true'
@@ -204,8 +229,9 @@ runs:
         benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
         fail-on-alert: false
         github-token: ${{ inputs.github-token }}
-        # Regressions that reach the default branch still leave a visible trace
-        comment-on-alert: true
+        # Alerting lives in Compare With Baseline, which knows that MB/s is
+        # bigger-is-better; this step would report throughput gains as regressions
+        comment-on-alert: false
         summary-always: true
         # Save the data to external file (GitHub Pages)
         save-data-file: true

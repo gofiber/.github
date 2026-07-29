@@ -45,6 +45,11 @@ on:
         required: false
         default: 150%
         type: string
+      improve-threshold:
+        description: Improvement from which a result is reported back in the PR comment
+        required: false
+        default: 110%
+        type: string
       filter-parallel:
         description: Drop Benchmark*_Parallel results before processing
         required: false
@@ -299,6 +304,7 @@ jobs:
           filter-parallel: ${{ inputs.filter-parallel }}
           alert-min-ns: ${{ inputs.alert-min-ns }}
           alert-threshold: ${{ inputs.alert-threshold }}
+          improve-threshold: ${{ inputs.improve-threshold }}
           go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
           max-items-in-chart: ${{ inputs.max-items-in-chart }}
           benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
@@ -374,6 +380,7 @@ jobs:
           filter-parallel: ${{ inputs.filter-parallel }}
           alert-min-ns: ${{ inputs.alert-min-ns }}
           alert-threshold: ${{ inputs.alert-threshold }}
+          improve-threshold: ${{ inputs.improve-threshold }}
           go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
           max-items-in-chart: ${{ inputs.max-items-in-chart }}
           benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}

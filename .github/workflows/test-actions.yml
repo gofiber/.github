@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - '.github/actions/**'
+      - '.github/scripts/**'
+      - '.github/workflows/benchmark.yml'
       - '.github/workflows/test-actions.yml'
 
 concurrency:
@@ -17,6 +19,20 @@ permissions:
   contents: read
 
 jobs:
+  # these had no runner until now, so they only ever ran on someone's laptop
+  scripts:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Run script self-checks
+        run: |
+          set -euo pipefail
+          bash .github/scripts/test/test-benchmark-cpu-key.sh
+          python3 .github/scripts/test/test_benchmark_compare.py
+          python3 .github/scripts/test/test_shard_benchmarks.py
+
   discover:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15

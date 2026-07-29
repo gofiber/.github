@@ -9,6 +9,7 @@ set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 WORKFLOW="$SCRIPT_DIR/../../workflows/benchmark.yml"
+REPORT_ACTION="$SCRIPT_DIR/../../actions/benchmark-report/action.yml"
 
 fails=0
 check() {
@@ -76,7 +77,7 @@ slug() {
   printf '%s' "${s%-}"
 }
 
-key() { printf 'benchmark-Linux-%s-%s-' "$(slug "$1")" "$(slug "$2")"; }
+key() { printf 'benchmark-v2-Linux-%s-%s-' "$(slug "$1")" "$(slug "$2")"; }
 
 echo "--- GOMAXPROCS pin"
 check "4vcpu label"      "4"  "$(pin blacksmith-4vcpu-ubuntu-2404)"
@@ -137,6 +138,9 @@ check "single-job path forwards it" "yes" \
   "$(grep -qF 'cpu-model: ${{ env.BENCHMARK_CPU }}' "$WORKFLOW" && echo yes || echo no)"
 check "workflow joins every model" "yes" \
   "$(grep -qF 'cpu=$(IFS=+' "$WORKFLOW" && echo yes || echo no)"
+# key() above mirrors the action; a bumped prefix there must be bumped here too
+check "action still builds the v2 prefix" "yes" \
+  "$(grep -qF 'prefix=benchmark-v2-${{ runner.os }}-' "$REPORT_ACTION" && echo yes || echo no)"
 
 echo
 if [ "$fails" -gt 0 ]; then
