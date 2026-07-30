@@ -263,6 +263,23 @@ def test_too_many_findings_carry_no_fingerprint():
     assert outputs["changed"] == "true"
 
 
+def test_a_fingerprint_survives_the_crlf_round_trip():
+    # GitHub rewrites a comment body to CRLF once anyone edits it in the web UI
+    base = bench(BenchmarkX="100 ns/op")
+    _, report, _ = run(base, bench(BenchmarkX="300 ns/op"))
+    crlf = report.replace("\n", "\r\n")
+    assert compare.read_digest(crlf) == compare.read_digest(report) != None  # noqa: E711
+    _, _, outputs = run(base, bench(BenchmarkX="310 ns/op"), previous=crlf)
+    assert outputs["changed"] == "false"
+
+
+def test_the_footer_links_to_the_full_run():
+    # the tables are capped, so the comment has to say where the rest lives
+    base = bench(BenchmarkX="100 ns/op")
+    _, report, _ = run(base, bench(BenchmarkX="300 ns/op"), extra=["--run-url", "https://x.test/runs/1"])
+    assert "[full results](https://x.test/runs/1)" in report, report
+
+
 def test_an_unreadable_fingerprint_counts_as_changed():
     # a report is a comment, and a comment is something anyone can edit into nonsense
     assert compare.read_digest("<!-- benchmark-fingerprint\np|B|ns/op wat\n-->") is None

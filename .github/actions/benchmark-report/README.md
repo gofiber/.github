@@ -81,8 +81,8 @@ a1b2c3d vs main@6955385 · 1608/1620 results compared · Neoverse-N1 (GOMAXPROCS
   benchmark move together and share a row.
 - The package is shortened to what is not shared with the other findings, and the
   full path moves to the footer when there is only one.
-- Tables stop at 15 rows. The job summary carries the same report, every measured
-  number is in the `go test -bench` output in the job log.
+- Tables stop at 15 rows. The footer links to the workflow run, where the job
+  summary carries the same report and the job log has every measured number.
 
 ## Tests
 

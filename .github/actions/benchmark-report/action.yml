@@ -213,6 +213,7 @@ runs:
         MATCHED_KEY: ${{ steps.cache.outputs.cache-matched-key }}
         # the head of the PR, not the merge commit nobody can look up
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
         if [[ "${COMPARABLE}" != "true" ]]; then
@@ -240,7 +241,8 @@ runs:
           --min-ns "$ALERT_MIN_NS" \
           --commit "$COMMIT" \
           --baseline "$BASELINE" \
-          --hardware "$CPU_MODEL")" || status=$?
+          --hardware "$CPU_MODEL" \
+          --run-url "$RUN_URL")" || status=$?
         printf '%s\n' "$output"
         # exit 1 means regressions, anything else means the script itself broke
         if [[ "$status" -gt 1 ]]; then

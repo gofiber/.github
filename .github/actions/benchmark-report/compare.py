@@ -22,7 +22,9 @@ from collections import namedtuple
 # benchmark name itself ends in -<digits> (subtests like Benchmark_X/n-8).
 BENCH_RE = re.compile(r"^(?P<name>Benchmark\S*?)(?:-\d+)?[ \t]+\d+[ \t]+(?P<rest>\S.*?)[ \t]*$")
 PKG_RE = re.compile(r"^pkg:[ \t]+(?P<pkg>\S+)")
-FINGERPRINT_RE = re.compile(r"<!-- benchmark-fingerprint\n(?P<body>.*?)-->", re.S)
+# \r?: GitHub rewrites a comment body to CRLF once anyone edits it in the web UI,
+# and a digest that stops matching would silently turn every run into "changed"
+FINGERPRINT_RE = re.compile(r"<!-- benchmark-fingerprint\r?\n(?P<body>.*?)-->", re.S)
 # Beyond this the digest would outweigh the report it rides on. Leaving it out
 # just means the next run counts as changed, which is the safe direction.
 FINGERPRINT_MAX = 200
@@ -301,6 +303,7 @@ def main(argv=None):
     parser.add_argument("--hardware", default="")
     parser.add_argument("--baseline", default="")
     parser.add_argument("--commit", default="")
+    parser.add_argument("--run-url", default="")
     # Report currently posted on the PR. Its fingerprint decides `changed`, which is
     # what keeps a commit that moved nothing from producing a second comment.
     parser.add_argument("--previous", default="")
@@ -327,6 +330,9 @@ def main(argv=None):
         notes.append(f"⚠️ {duplicates} measured twice")
     if args.hardware:
         notes.append(args.hardware)
+    if args.run_url:
+        # where the capped tables and the raw `go test -bench` numbers live
+        notes.append(f"[full results]({args.run_url})")
 
     report = render(worse, better, args.threshold, improve_threshold, args.limit, notes)
     with open(args.out, "w", encoding="utf-8") as handle:
