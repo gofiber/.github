@@ -158,14 +158,15 @@ runs:
           exit 0
         fi
         status=0
-        python3 "${ACTION_PATH}/compare.py" \
+        output="$(python3 "${ACTION_PATH}/compare.py" \
           --base ./cache/baseline.txt \
           --current "$OUTPUT_FILE" \
           --out report.md \
           --threshold "$ALERT_THRESHOLD" \
           --improve-threshold "$IMPROVE_THRESHOLD" \
           --min-ns "$ALERT_MIN_NS" \
-          --hardware "$CPU_MODEL" || status=$?
+          --hardware "$CPU_MODEL")" || status=$?
+        echo "$output"
         # exit 1 means regressions, anything else means the script itself broke
         if [[ "$status" -gt 1 ]]; then
           exit "$status"
@@ -173,9 +174,12 @@ runs:
         cat report.md >> "$GITHUB_STEP_SUMMARY"
         echo "compared=true" >> "$GITHUB_OUTPUT"
         echo "regressed=$([[ "$status" -eq 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        improvements="$(grep -oE 'improvements=[0-9]+' <<< "$output" | cut -d= -f2 || true)"
+        echo "significant=$([[ "$status" -eq 1 || "${improvements:-0}" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
-    # A PR is posted to unconditionally so the sticky comment drops its alert again
-    # once the regression is fixed; the default branch only reports actual problems.
+    # A PR only gets a fresh comment when there is something to say; an existing
+    # comment is still updated (or cleared once neutral) so a fixed regression's
+    # alert does not linger. The default branch only reports actual problems.
     - name: Post Benchmark Report
       if: >-
         steps.compare.outputs.compared == 'true'
@@ -187,18 +191,27 @@ runs:
         REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
         SHA: ${{ github.sha }}
+        SIGNIFICANT: ${{ steps.compare.outputs.significant }}
         # per module, so the matrix legs of a multi-package repo do not overwrite each other
         MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
       run: |
         set -euo pipefail
-        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
         if [[ -z "$PR" ]]; then
+          { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
           gh api -X POST "repos/${REPO}/commits/${SHA}/comments" -F body=@comment.md > /dev/null
           exit 0
         fi
         # --jq runs per page, so emit every match and let tail pick the newest
         id="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
           --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | tail -n1)"
+        if [[ "$SIGNIFICANT" != "true" ]]; then
+          # nothing worth flagging; clear a stale alert if one is posted, else stay quiet
+          if [[ -n "$id" ]]; then
+            gh api -X DELETE "repos/${REPO}/issues/comments/${id}" > /dev/null
+          fi
+          exit 0
+        fi
+        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
         if [[ -n "$id" ]]; then
           gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F body=@comment.md > /dev/null
         else
