@@ -13,6 +13,7 @@ can tell whether anything actually changed and keep quiet when it did not.
 """
 import argparse
 import glob
+import json
 import math
 import os
 import re
@@ -34,6 +35,16 @@ UNITS = ("ns/op", "MB/s", "B/op", "allocs/op")
 # A run where this many benchmarks moved is not having a noise problem, and
 # re-measuring them would cost a good part of the full suite again.
 RETEST_MAX = 100
+# How the published history's series names carry package and metric, and how far
+# above a benchmark's own historic wobble its personal threshold sits. The margin
+# is deliberately thin: the wobble is already the tail of observed noise.
+# Calibrated on PR 3702's three surviving false positives (1.54-1.72x): p95
+# kills all three, p90 let one through by a hair.
+HISTORY_METRIC_RE = re.compile(r" - [^ ]*/[^ ]*$")
+HISTORY_PKG_RE = re.compile(r" \(([^()]+)\)$")
+NOISE_MARGIN = 1.15
+NOISE_QUANTILE = 0.95
+NOISE_MIN_PAIRS = 5
 
 Key = namedtuple("Key", "pkg name unit")
 Change = namedtuple("Change", "key base current ratio")
@@ -93,7 +104,16 @@ def ratio(unit, base, current):
     return current / base
 
 
-def compare(base, current, threshold, improve_threshold, min_ns):
+def bars(key, threshold, improve_threshold, noise):
+    """The thresholds for one benchmark: at least its own historic noise floor."""
+    wobble = noise.get(key) if noise else None
+    if not wobble:
+        return threshold, improve_threshold
+    floor = wobble * NOISE_MARGIN
+    return max(threshold, floor), max(improve_threshold, floor)
+
+
+def compare(base, current, threshold, improve_threshold, min_ns, noise=None):
     """Split the benchmarks present in both runs into regressions and improvements."""
     too_fast = {
         (key.pkg, key.name)
@@ -105,13 +125,55 @@ def compare(base, current, threshold, improve_threshold, min_ns):
         if key not in base or (key.pkg, key.name) in too_fast:
             continue
         change = Change(key, base[key], value, ratio(key.unit, base[key], value))
-        if change.ratio >= threshold:
+        bar, improve_bar = bars(key, threshold, improve_threshold, noise)
+        if change.ratio >= bar:
             worse.append(change)
-        elif change.ratio <= 1 / improve_threshold:
+        elif change.ratio <= 1 / improve_bar:
             better.append(change)
     worse.sort(key=lambda c: -c.ratio)
     better.sort(key=lambda c: c.ratio)
     return worse, better
+
+
+def read_history(path):
+    """Per-benchmark run-to-run wobble from the published v2 data, {Key: factor}.
+
+    Adjacent default-branch runs are overwhelmingly same-code, so the tail of
+    their pairwise ratios is that benchmark's own noise band, measured across
+    many machines - which is exactly what a same-machine retest cannot see.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return {}
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return {}
+    if data.get("version") != 2:
+        return {}
+    wobble = {}
+    for row, name in enumerate(data.get("names", [])):
+        series = HISTORY_METRIC_RE.sub("", name)
+        pkg_match = HISTORY_PKG_RE.search(series)
+        pkg = pkg_match.group(1) if pkg_match else ""
+        bare = series[: pkg_match.start()] if pkg_match else series
+        values = [v for v in data["values"][row] if v is not None]
+        ratios = []
+        for before, after in zip(values, values[1:]):
+            if before > 0 and after > 0:
+                step = after / before
+                ratios.append(step if step >= 1 else 1 / step)
+        if len(ratios) < NOISE_MIN_PAIRS:
+            continue
+        ratios.sort()
+        tail = ratios[int(NOISE_QUANTILE * (len(ratios) - 1))]
+        wobble[Key(pkg, bare, data["units"][row])] = rounded(tail)
+    return wobble
 
 
 def strength(value, improved):
@@ -251,7 +313,13 @@ def near(before, after, tolerance):
     return max(before, after) / min(before, after) <= 1 + tolerance
 
 
-def nothing_new(previous, found, now, tolerance):
+def slack(key, tolerance, noise):
+    """The movement a benchmark gets for free: its own noise band, at least tolerance."""
+    wobble = noise.get(key) if noise else None
+    return max(tolerance, wobble - 1) if wobble else tolerance
+
+
+def nothing_new(previous, found, now, tolerance, noise=None):
     """Whether the posted report still describes this run.
 
     Deliberately asymmetric: a benchmark it does not name yet is news, but one it
@@ -261,7 +329,11 @@ def nothing_new(previous, found, now, tolerance):
     """
     if previous is None or any(key not in previous for key in found):
         return False
-    return all(near(before, now.get(key), tolerance) for key, before in previous.items())
+    for text, before in previous.items():
+        key = text_key(text)
+        if not near(before, now.get(text), slack(key, tolerance, noise) if key else tolerance):
+            return False
+    return True
 
 
 def headline(rows, threshold, symbol, word):
@@ -364,6 +436,45 @@ def write_plan(path, keys, workdir):
             handle.write(directory + "\t" + " ".join(groups[directory]) + "\n")
 
 
+def write_details(path, base, first_run, retested, to_verify, flagged_worse, flagged_better, worse, better, threshold, improve_threshold, noise):
+    """The verification breakdown, one row per checked benchmark, for the summary."""
+    final_worse = {c.key for c in worse}
+    final_better = {c.key for c in better}
+    lines = ["### Verification", ""]
+    if not to_verify:
+        lines.append("Nothing crossed a threshold or moved against the posted report.")
+    elif not retested:
+        lines.append(f"{len(pairs(to_verify))} result(s) flagged, but not re-measured; the first measurement stands.")
+    else:
+        lines += [
+            "| Benchmark | Unit | Noise bar | First run | Retest | Outcome |",
+            "|-|-|-|-|-|-|",
+        ]
+        for key in sorted(to_verify)[:150]:
+            first = rounded(ratio(key.unit, base[key], first_run[key]))
+            second = retested.get(key)
+            second_text = "-"
+            if second is not None:
+                second_text = factor_text(rounded(ratio(key.unit, base[key], second)))
+            bar, improve_bar = bars(key, threshold, improve_threshold, noise)
+            if key in final_worse:
+                outcome = "regression confirmed"
+            elif key in final_better:
+                outcome = "improvement confirmed"
+            elif key in flagged_worse or key in flagged_better:
+                outcome = "not reproduced, dropped"
+            else:
+                outcome = "reported result re-checked"
+            lines.append(
+                f"| `{key.name}` <sub>{key.pkg}</sub> | {key.unit} |"
+                f" {factor_text(max(bar, improve_bar))} | {factor_text(first)} | {second_text} | {outcome} |"
+            )
+        if len(to_verify) > 150:
+            lines.append(f"| _and {len(to_verify) - 150} more_ | | | | | |")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(lines) + "\n")
+
+
 def save_verified(path, results):
     """The believed values in `go test -bench` shape, so parse() reads them back.
 
@@ -406,6 +517,10 @@ def main(argv=None):
     parser.add_argument("--retested", default="")
     # module root (or loop-mode parent) the plan's directories are relative to
     parser.add_argument("--workdir", default=".")
+    # published v2 data.js; per-benchmark noise floors are derived from it
+    parser.add_argument("--history", default="")
+    # verification breakdown for the job summary, kept out of the PR comment
+    parser.add_argument("--details", default="")
     # The believed values, written in `go test -bench` shape. The default branch
     # stores them as the baseline, so a one-off spike in its own run does not
     # become the number every following PR is judged against.
@@ -421,8 +536,9 @@ def main(argv=None):
         base, _ = parse(handle)
     with open(args.current, encoding="utf-8") as handle:
         current, duplicates = parse(handle)
+    noise = read_history(args.history) if args.history else {}
 
-    worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns)
+    worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns, noise)
 
     previous = ""
     if args.previous and os.path.exists(args.previous):
@@ -443,7 +559,11 @@ def main(argv=None):
             key is not None
             and key in current
             and key in base
-            and not near(before, rounded(ratio(key.unit, base[key], current[key])), args.tolerance)
+            and not near(
+                before,
+                rounded(ratio(key.unit, base[key], current[key])),
+                slack(key, args.tolerance, noise),
+            )
         ):
             stale.add(key)
     to_verify = flagged_worse | flagged_better | stale
@@ -455,6 +575,7 @@ def main(argv=None):
             # re-measurement from deciding the verification either way
             retested = {key: statistics.median(values) for key, values in parse_runs(handle).items()}
     retest_note = ""
+    first_run = current
     if retested and to_verify:
         reported_side = {}
         for text, before in reported.items():
@@ -463,8 +584,9 @@ def main(argv=None):
                 reported_side[key] = "w" if before > 1 else "b"
 
         def side(key, value):
+            bar, improve_bar = bars(key, args.threshold, improve_threshold, noise)
             spot = ratio(key.unit, base[key], value)
-            return "w" if spot >= args.threshold else "b" if spot <= 1 / improve_threshold else "-"
+            return "w" if spot >= bar else "b" if spot <= 1 / improve_bar else "-"
 
         def believe(key, value):
             second = retested.get(key)
@@ -482,7 +604,7 @@ def main(argv=None):
             key: believe(key, value) if key in to_verify else value
             for key, value in current.items()
         }
-        worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns)
+        worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns, noise)
         # A finding survives when both measurements of this run agree on its
         # direction, or when the posted report already said the same; a lone flip
         # (slower once, faster once) is exactly the noise the retest exists to kill.
@@ -502,6 +624,12 @@ def main(argv=None):
         if extra:
             parts.append(f"{len(pairs(extra))} reported re-checked")
         retest_note = "retest: " + ", ".join(parts)
+    if args.details:
+        write_details(
+            args.details, base, first_run, retested, to_verify,
+            flagged_worse, flagged_better, worse, better,
+            args.threshold, improve_threshold, noise,
+        )
     if args.retest_plan:
         write_plan(args.retest_plan, [] if retested else to_verify, args.workdir)
     if args.save_verified and retested:
@@ -522,6 +650,8 @@ def main(argv=None):
         notes.append(f"⚠️ {duplicates} measured twice")
     if retest_note:
         notes.append(retest_note)
+    if noise:
+        notes.append("noise-aware thresholds")
     if args.hardware:
         notes.append(args.hardware)
     if args.run_url:
@@ -533,7 +663,7 @@ def main(argv=None):
         handle.write(report)
 
     changed = not nothing_new(
-        previous_digest, digest(worse + better), factors(base, current), args.tolerance
+        previous_digest, digest(worse + better), factors(base, current), args.tolerance, noise
     )
 
     for key, value in (

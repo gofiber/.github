@@ -64,42 +64,51 @@ def test_balance():
     assert max(sizes) - min(sizes) <= 1, sizes
 
 
-def v2(names_units_values):
-    import json
-    rows = list(names_units_values)
-    return "window.BENCHMARK_DATA = " + json.dumps({
-        "version": 2, "lastUpdate": 1, "repoUrl": "r", "runs": [{"id": "a"}],
-        "names": [n for n, _, _ in rows],
-        "units": [u for _, u, _ in rows],
-        "values": [v for _, _, v in rows],
-    })
+BASELINE = """\
+goos: linux
+goarch: arm64
+pkg: github.com/x/root
+Benchmark_Big/a-4\t10\t100.00 ns/op\t24 B/op\t1 allocs/op
+Benchmark_Big/b-4\t10\t100.00 ns/op
+Benchmark_Big/c-4\t10\t100.00 ns/op
+Benchmark_Small-4\t10\t100.00 ns/op
+PASS
+ok  \tgithub.com/x/root\t30.0s
+pkg: github.com/x/proxy
+Benchmark_Fast-4\t10\t50.00 ns/op
+ok  \tgithub.com/x/proxy\t40.0s
+pkg: github.com/x/proxy
+Benchmark_Fast2-4\t10\t50.00 ns/op
+ok  \tgithub.com/x/proxy\t34.0s
+pkg: github.com/x/silent
+Benchmark_NoOk-4\t10\t50.00 ns/op
+"""
 
 
-def test_weigh_counts_variants_once_no_matter_how_many_units():
-    weights = sb.weigh(v2([
-        ("BenchmarkBig/s1 (github.com/x/root) - ns/op", "ns/op", [100.0]),
-        ("BenchmarkBig/s1 (github.com/x/root) - B/op", "B/op", [24.0]),
-        ("BenchmarkBig/s2 (github.com/x/root) - ns/op", "ns/op", [100.0]),
-        ("BenchmarkSmall (github.com/x/root) - ns/op", "ns/op", [100.0]),
-    ]))
-    # two variants weigh twice one variant; the B/op row adds nothing
-    assert weights["github.com/x/root BenchmarkBig"] == 2 * weights["github.com/x/root BenchmarkSmall"], weights
+def test_weigh_splits_measured_package_seconds_by_variant_share():
+    weights = sb.weigh(BASELINE)
+    # root measured 30s: Big has 3 of 4 variants, Small 1 of 4. The wall time
+    # covers setup that ns/op never shows, which is the whole point.
+    assert weights["github.com/x/root Benchmark_Big"] == 22.5, weights
+    assert weights["github.com/x/root Benchmark_Small"] == 7.5, weights
 
 
-def test_weigh_charges_slow_single_iterations():
-    weights = sb.weigh(v2([
-        ("BenchmarkSlow (github.com/x/root) - ns/op", "ns/op", [2e9]),
-        ("BenchmarkFast (github.com/x/root) - ns/op", "ns/op", [100.0]),
-    ]))
-    # a 2s/op benchmark overshoots benchtime on every ramp-up run
-    assert weights["github.com/x/root BenchmarkSlow"] > 5 * weights["github.com/x/root BenchmarkFast"], weights
+def test_weigh_sums_ok_lines_across_shards():
+    weights = sb.weigh(BASELINE)
+    # the merged baseline carries one ok line per shard that ran the package
+    assert weights["github.com/x/proxy Benchmark_Fast"] == 37.0, weights
+    assert weights["github.com/x/proxy Benchmark_Fast2"] == 37.0, weights
 
 
-def test_weigh_survives_garbage_and_legacy_data():
-    assert sb.weigh("not data at all") == {}
-    assert sb.weigh('window.BENCHMARK_DATA = {"entries": {"Benchmark": []}}') == {}
-    # names without a package suffix cannot be matched to `go test -list` pairs
-    assert sb.weigh(v2([("BenchmarkBare - ns/op", "ns/op", [1.0])])) == {}
+def test_weigh_skips_packages_without_a_measured_total():
+    weights = sb.weigh(BASELINE)
+    # no ok line, no guess: the benchmark falls back to the default at shard time
+    assert "github.com/x/silent Benchmark_NoOk" not in weights, weights
+
+
+def test_weigh_survives_garbage():
+    assert sb.weigh("") == {}
+    assert sb.weigh("not benchmark output at all\nok broken") == {}
 
 
 def test_weighted_shard_flattens_where_round_robin_cannot():
@@ -128,16 +137,6 @@ def test_new_and_deleted_benchmarks_survive_stale_weights():
     for i in range(2):
         seen += sb.shard(pairs, i, 2, weights)
     assert sorted(seen) == sorted(set(pairs)), seen
-
-
-def test_weigh_finds_the_ns_op_row_wherever_it_sits():
-    # trim and re-adding can reorder rows; the overshoot must not depend on the
-    # ns/op row coming first for its variant
-    weights = sb.weigh(v2([
-        ("BenchmarkSlow (github.com/x/root) - B/op", "B/op", [24.0]),
-        ("BenchmarkSlow (github.com/x/root) - ns/op", "ns/op", [2e9]),
-    ]))
-    assert weights["github.com/x/root BenchmarkSlow"] > 5, weights
 
 
 def test_empty_weights_keep_the_round_robin_untouched():

@@ -207,6 +207,7 @@ runs:
         ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
         OUTPUT_FILE: ${{ inputs.output-file }}
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        DATA_DIR: ${{ inputs.benchmark-data-dir-path }}
         CPU_MODEL: ${{ steps.cpu.outputs.model }}
         COMPARABLE: ${{ steps.cpu.outputs.comparable }}
         ACTION_PATH: ${{ github.action_path }}
@@ -231,6 +232,11 @@ runs:
         if [[ "${#BASE_SHA}" -ne 40 ]]; then
           BASE_SHA=""
         fi
+        # The published history carries every benchmark's own noise band; a
+        # same-machine retest cannot see cross-machine wobble, this can.
+        if ! curl -fsSL --max-time 10 "${REPO_URL}/raw/gh-pages/${DATA_DIR}/data.js" -o history.js 2> /dev/null; then
+          : > history.js
+        fi
         compare() {
           python3 "${ACTION_PATH}/compare.py" \
             --base ./cache/baseline.txt \
@@ -246,6 +252,8 @@ runs:
             --repo-url "$REPO_URL" \
             --run-url "$RUN_URL" \
             --workdir "$WORKING_DIRECTORY" \
+            --history history.js \
+            --details retest-details.md \
             "$@"
         }
         status=0
@@ -322,6 +330,10 @@ runs:
           fi
         fi
         cat report.md >> "$GITHUB_STEP_SUMMARY"
+        if [[ -f retest-details.md ]]; then
+          printf '\n' >> "$GITHUB_STEP_SUMMARY"
+          cat retest-details.md >> "$GITHUB_STEP_SUMMARY"
+        fi
         printf '%s\ncompared=true\n' "$output" >> "$GITHUB_OUTPUT"
 
     # Comment rules in full: see README.md next to this file. Short version: refresh

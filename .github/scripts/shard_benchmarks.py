@@ -10,9 +10,10 @@ single regex over ./... would run those in every package that defines them and
 measure them twice. Hence one invocation per package.
 
 `go test -list` only sees top-level functions, but their cost varies wildly: the
-sub-benchmarks are registered at runtime and one function can hide fifty of them.
-With WEIGHTS set (JSON from `shard_benchmarks.py weights`, fed the published
-gh-pages data by the plan job), the split balances estimated seconds instead of
+sub-benchmarks are registered at runtime, one function can hide fifty of them,
+and setup outside the timer (proxy starts real servers) never shows in ns/op.
+With WEIGHTS set (JSON from `shard_benchmarks.py weights`, fed the last merged
+baseline output by the plan job), the split balances measured seconds instead of
 counting functions; without it, the old round-robin stands.
 """
 import json
@@ -21,10 +22,12 @@ import os
 import re
 import sys
 
-# a variant is roughly benchtime plus ramp-up; slow single iterations overshoot
+# a variant without history is assumed to cost about one benchtime plus ramp-up
 BASE_SECONDS = 1.2
-METRIC_SUFFIX_RE = re.compile(r" - [^ ]*/[^ ]*$")
-PKG_SUFFIX_RE = re.compile(r" \(([^()]+)\)$")
+PKG_HEADER_RE = re.compile(r"^pkg:\s+(\S+)")
+OK_RE = re.compile(r"^ok\s+(\S+)\s+([\d.]+)s")
+# the trailing -GOMAXPROCS is split off, `go test -list` names carry none
+BENCH_NAME_RE = re.compile(r"^(Benchmark\S*?)(?:-\d+)?\s+\d")
 
 
 def parse(stream):
@@ -46,42 +49,39 @@ def parse(stream):
 
 
 def weigh(text):
-    """Estimated seconds per top-level benchmark, from the published v2 data.
+    """Measured seconds per top-level benchmark, from the last merged baseline.
 
-    Returns {"<pkg> <name>": seconds}. Anything that fails to parse simply
-    yields {}, which downgrades the split to the count-balanced one.
+    Returns {"<pkg> <name>": seconds}. The baseline's `ok <pkg> <secs>` lines
+    carry each package's real wall time - including the setup that ns/op never
+    shows - summed across the shards that ran it, and split over the package's
+    top-level benchmarks by their share of variants. Anything that fails to
+    parse yields {}, which downgrades the split to the count-balanced one.
     """
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return {}
-    try:
-        data = json.loads(text[start : end + 1])
-    except ValueError:
-        return {}
-    if data.get("version") != 2:
-        return {}
-    variants = {}
-    for row, name in enumerate(data.get("names", [])):
-        series = METRIC_SUFFIX_RE.sub("", name)
-        pkg_match = PKG_SUFFIX_RE.search(series)
-        if not pkg_match:
+    pkg = ""
+    seconds = {}
+    tops = {}
+    for line in text.splitlines():
+        header = PKG_HEADER_RE.match(line)
+        if header:
+            pkg = header.group(1)
             continue
-        pkg = pkg_match.group(1)
-        bare = series[: pkg_match.start()]
-        # one weight contribution per variant, no matter how many units it carries;
-        # the ns/op row may sit anywhere among them
-        variants.setdefault((pkg, bare), BASE_SECONDS)
-        if data["units"][row] == "ns/op":
-            values = [v for v in data["values"][row] if v is not None]
-            if values:
-                # a slow single iteration blows past benchtime on every ramp-up run
-                variants[(pkg, bare)] = BASE_SECONDS + 3 * values[-1] / 1e9
+        finished = OK_RE.match(line)
+        if finished:
+            seconds[finished.group(1)] = seconds.get(finished.group(1), 0.0) + float(finished.group(2))
+            continue
+        bench = BENCH_NAME_RE.match(line)
+        if bench and pkg:
+            name = bench.group(1)
+            tops.setdefault(pkg, {}).setdefault(name.partition("/")[0], set()).add(name)
     weights = {}
-    for (pkg, bare), seconds in variants.items():
-        base, _, _ = bare.partition("/")
-        key = f"{pkg} {base}"
-        weights[key] = weights.get(key, 0.0) + seconds
-    return {key: round(seconds, 3) for key, seconds in weights.items()}
+    for pkg, benchmarks in tops.items():
+        total = seconds.get(pkg)
+        count = sum(len(variants) for variants in benchmarks.values())
+        if not total or not count:
+            continue
+        for top, variants in benchmarks.items():
+            weights[f"{pkg} {top}"] = round(total * len(variants) / count, 3)
+    return weights
 
 
 def shard(pairs, index, total, weights=None):
@@ -117,7 +117,7 @@ def render(selected):
 
 def main():
     if sys.argv[1:] == ["weights"]:
-        # plan job: published data.js on stdin, weights JSON on stdout
+        # plan job: the last merged baseline output on stdin, weights JSON on stdout
         print(json.dumps(weigh(sys.stdin.read()), separators=(",", ":"), sort_keys=True))
         return
 

@@ -150,22 +150,28 @@ jobs:
           repository: gofiber/.github
           path: .central
 
-      # Fetched ONCE here and handed to every leg, so all legs split on identical
-      # weights; legs fetching it themselves could straddle a publish and would
-      # silently drop or double benchmarks.
-      - name: Weigh benchmarks from published history
+      # The merged output of the last default-branch run: its `ok <pkg> <secs>`
+      # lines carry measured wall time including the benchmark setup that ns/op
+      # never shows (proxy spends 70s+ on servers it starts outside the timer).
+      - name: Restore the last benchmark baseline
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ./cache
+          key: benchmark-plan-weights-lookup
+          restore-keys: benchmark-v2-${{ runner.os }}-
+
+      # Weighed ONCE here and handed to every leg, so all legs split on identical
+      # weights; legs computing them from data fetched separately could straddle
+      # a publish and silently drop or double benchmarks.
+      - name: Weigh benchmarks from the last baseline
         id: weigh
         shell: bash
-        env:
-          DATA_URL: >-
-            ${{ github.server_url }}/${{ github.repository }}/raw/gh-pages/${{
-            inputs.benchmark-data-dir-path }}/data.js
         run: |
           set -euo pipefail
-          # best effort: no gh-pages or a legacy data.js just means count-balanced shards
+          # best effort: no baseline yet just means count-balanced shards
           weights="{}"
-          if curl -fsSL --max-time 20 "$DATA_URL" -o data.js 2> /dev/null; then
-            weights="$(python3 .central/.github/scripts/shard_benchmarks.py weights < data.js || echo '{}')"
+          if [[ -f ./cache/baseline.txt ]]; then
+            weights="$(python3 .central/.github/scripts/shard_benchmarks.py weights < ./cache/baseline.txt || echo '{}')"
           fi
           echo "weights=${weights}" >> "$GITHUB_OUTPUT"
           echo "Shard weights for $(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$weights") benchmarks" \
@@ -288,9 +294,16 @@ jobs:
           SHARD_INDEX: ${{ matrix.shard }}
           SHARD_TOTAL: ${{ inputs.shards }}
           WEIGHTS: ${{ needs.plan.outputs.weights }}
+          FILTER_PARALLEL: ${{ inputs.filter-parallel }}
         run: |
           set -euo pipefail
           go test -list '^Benchmark' ./... > bench-list.txt
+          # -skip does not filter -list: what the report drops anyway must not be
+          # scheduled here, nor carry phantom weight in the split
+          if [[ "$FILTER_PARALLEL" == "true" ]]; then
+            awk '!/^Benchmark.*Parallel/' bench-list.txt > bench-list-filtered.txt
+            mv bench-list-filtered.txt bench-list.txt
+          fi
           python3 "$GITHUB_WORKSPACE/.central/.github/scripts/shard_benchmarks.py" \
             < bench-list.txt > bench-plan.txt
           : > "$GITHUB_WORKSPACE/output.txt"
@@ -300,6 +313,22 @@ jobs:
             go test -benchmem -run=^$ -bench "$pattern" $GO_TEST_FLAGS "$pkg" \
               | tee -a "$GITHUB_WORKSPACE/output.txt"
           done < bench-plan.txt
+
+      # The per-shard numbers used to live only in the raw log; the summary makes
+      # a shard's own measurements readable without digging.
+      - name: Add results to job summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -s "$GITHUB_WORKSPACE/output.txt" ]]; then
+            exit 0
+          fi
+          count="$(grep -c '^Benchmark' "$GITHUB_WORKSPACE/output.txt" || true)"
+          {
+            printf '<details><summary>%s benchmark results</summary>\n\n```\n' "${count:-0}"
+            grep -E '^(pkg:|Benchmark|ok )' "$GITHUB_WORKSPACE/output.txt" || true
+            printf '```\n\n</details>\n'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Record shard result
         if: inputs.shards > 1
@@ -354,8 +383,18 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # No Go here on purpose: only a retest needs a toolchain, and benchmark-report
-      # fetches one itself in that case. Quiet runs skip the ~15s setup-go cost.
+      # The retest fires on most real runs (with hundreds of benchmarks something
+      # always crosses a threshold), so a warm toolchain and module cache beat
+      # fetching Go on demand: measured 72s cold vs ~10s warm. check-latest is
+      # off on purpose: the image-bundled toolchain skips the download, and a
+      # patch-level difference does not matter for re-measuring.
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          check-latest: false
+          # sharding is single-module only, so the module sits in working-directory
+          cache-dependency-path: ${{ format('{0}/go.sum', inputs.working-directory) }}
 
       - name: Build artifact prefix
         id: prefix

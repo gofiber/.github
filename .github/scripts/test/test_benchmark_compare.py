@@ -2,6 +2,7 @@
 """Self-check for the benchmark-report compare script: run it directly, it prints OK."""
 import contextlib
 import io
+import json
 import pathlib
 import sys
 import tempfile
@@ -547,6 +548,90 @@ def test_metrics_keep_the_order_go_prints_them_in():
     _, report, _ = run(base, current)
     # B/op moved further, but a row that reshuffles by magnitude is a row nobody can scan
     assert "100 → 200 ns/op · 24 → 240 B/op" in report, report
+
+
+def history(values_by_name):
+    """A v2 data.js text with one ns/op row per name and the given value series."""
+    names = sorted(values_by_name)
+    return "window.BENCHMARK_DATA = " + json.dumps({
+        "version": 2, "lastUpdate": 1, "repoUrl": "r",
+        "runs": [{"id": str(i)} for i in range(max(len(v) for v in values_by_name.values()))],
+        "names": [f"{n} (p) - ns/op" for n in names],
+        "units": ["ns/op"] * len(names),
+        "values": [values_by_name[n] for n in names],
+    })
+
+
+def run_history(base, current, hist, previous=None, retested=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        pathlib.Path(f"{tmp}/history.js").write_text(hist, encoding="utf-8")
+        return run(base, current, previous=previous, retested=retested,
+                   extra=["--history", f"{tmp}/history.js"])
+
+
+def test_a_wobbly_benchmark_gets_a_higher_bar_from_its_history():
+    # PR 3702: proxy/cache/IPs "improvements" reproduced on the same machine, but
+    # the published history shows those benchmarks swing that far on their own
+    base = bench(BenchmarkX="195 ns/op")
+    wobbly = history({"BenchmarkX": [100, 160, 95, 170, 105, 165, 98, 175, 102, 168]})
+    _, report, outputs = run_history(base, bench(BenchmarkX="122 ns/op"), wobbly)
+    assert outputs["significant"] == "false", outputs
+    assert "No significant benchmark change" in report, report
+    # the same 1.6x move on a historically stable benchmark is a real finding
+    stable = history({"BenchmarkX": [100, 101, 99, 100, 102, 100, 101, 99, 100, 100]})
+    _, report, outputs = run_history(base, bench(BenchmarkX="122 ns/op"), stable)
+    assert outputs["significant"] == "true", outputs
+    assert "noise-aware thresholds" in report, report
+
+
+def test_noise_bars_apply_to_regressions_too():
+    base = bench(BenchmarkX="100 ns/op")
+    wobbly = history({"BenchmarkX": [100, 160, 95, 170, 105, 165, 98, 175, 102, 168]})
+    _, _, outputs = run_history(base, bench(BenchmarkX="165 ns/op"), wobbly)
+    assert outputs["regressed"] == "false", outputs
+    # far beyond even its own noise band still fails the gate
+    code, _, outputs = run_history(base, bench(BenchmarkX="450 ns/op"), wobbly)
+    assert code == 1 and outputs["regressed"] == "true", outputs
+
+
+def test_short_or_missing_history_changes_nothing():
+    base = bench(BenchmarkX="100 ns/op")
+    short = history({"BenchmarkX": [100, 160, 95]})
+    _, _, outputs = run_history(base, bench(BenchmarkX="160 ns/op"), short)
+    assert outputs["regressed"] == "true", outputs
+    _, _, outputs = run_history(base, bench(BenchmarkX="160 ns/op"), "garbage, not json")
+    assert outputs["regressed"] == "true", outputs
+
+
+def test_a_wobbly_reported_benchmark_does_not_go_stale_on_its_own_noise():
+    base = bench(BenchmarkX="100 ns/op")
+    _, first, _ = run(base, bench(BenchmarkX="300 ns/op"))
+    wobbly = history({"BenchmarkX": [100, 160, 95, 170, 105, 165, 98, 175, 102, 168]})
+    # 3.00x reported, 2.10x measured now: inside its own 1.7x noise band, so the
+    # posted report holds and nothing is re-verified
+    _, _, outputs = run_history(base, bench(BenchmarkX="210 ns/op"), wobbly, previous=first)
+    assert outputs["changed"] == "false", outputs
+
+
+def test_the_details_file_breaks_down_the_verification():
+    base = bench(BenchmarkSlow="100 ns/op", BenchmarkFast="100 ns/op")
+    current = bench(BenchmarkSlow="300 ns/op", BenchmarkFast="40 ns/op")
+    retested = bench(BenchmarkSlow="290 ns/op", BenchmarkFast="95 ns/op")
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = {n: f"{tmp}/{n}" for n in ("base", "current", "retested", "details")}
+        for name, text in (("base", base), ("current", current), ("retested", retested)):
+            pathlib.Path(paths[name]).write_text(text, encoding="utf-8")
+        code = compare.main([
+            "--base", paths["base"], "--current", paths["current"], "--out", f"{tmp}/out",
+            "--retested", paths["retested"], "--details", paths["details"],
+        ])
+        details = pathlib.Path(paths["details"]).read_text(encoding="utf-8")
+    assert code == 1
+    assert "### Verification" in details, details
+    # one row per checked unit: the confirmed regression and the dropped improvement
+    assert "`BenchmarkSlow`" in details and "regression confirmed" in details, details
+    assert "`BenchmarkFast`" in details and "not reproduced, dropped" in details, details
+    assert "| ns/op |" in details, details
 
 
 if __name__ == "__main__":

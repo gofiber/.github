@@ -73,6 +73,19 @@ Reports with more than 200 findings carry no fingerprint, they are treated as
 changed every time. At that point the report is not about individual benchmarks
 anymore.
 
+### Every benchmark carries its own noise floor
+
+A fixed threshold cannot serve 600 benchmarks at once: some sit rock-stable at
+±2%, others (proxy, SendFile, anything with heavy setup) swing 1.5-2x between
+runs of identical code. The published v2 history knows which is which: the p95
+of a benchmark's adjacent-run ratios is its personal noise band, and its
+effective threshold is `max(alert-threshold, p95 * 1.15)` in both directions.
+The same slack applies before a reported finding counts as moved. This is the
+defense a same-machine retest cannot provide: PR 3702's three surviving false
+improvements (1.54-1.72x on benchmarks that historically wobble that far) all
+die against their own history. Fetched best effort from gh-pages; without it,
+the flat thresholds stand.
+
 ### Every deviation has to reproduce
 
 The pools are noisy enough that a single measurement is as likely wobble as change
@@ -112,9 +125,9 @@ The rules of the re-measurement:
   reproduced, 1 reported re-checked`.
 - The retest is skipped, and the first measurement stands, when more than 100
   benchmarks moved (that is not a noise problem) or when the runner's CPU differs
-  from the one the numbers came from. The sharded report job carries no Go
-  toolchain; the retest fetches one on demand, so quiet runs never pay the
-  ~15s setup-go cost, and only an unfetchable toolchain skips the retest.
+  from the one the numbers came from.
+- The job summary carries a per-benchmark verification breakdown (first
+  measurement, retest, noise bar, outcome); the PR comment stays lean.
 
 ## Report format
 
