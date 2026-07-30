@@ -31,7 +31,9 @@ jobs:
           set -euo pipefail
           bash .github/scripts/test/test-benchmark-cpu-key.sh
           bash .github/scripts/test/test-benchmark-comment.sh
+          bash .github/scripts/test/test-benchmark-pages.sh
           python3 .github/scripts/test/test_benchmark_compare.py
+          python3 .github/scripts/test/test_benchmark_publish.py
           python3 .github/scripts/test/test_shard_benchmarks.py
 
   discover:

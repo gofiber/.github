@@ -245,6 +245,7 @@ runs:
             --baseline-sha "$BASE_SHA" \
             --repo-url "$REPO_URL" \
             --run-url "$RUN_URL" \
+            --workdir "$WORKING_DIRECTORY" \
             "$@"
         }
         status=0
@@ -263,8 +264,6 @@ runs:
           skip=""
           if ! command -v go > /dev/null; then
             skip="no Go toolchain on this runner"
-          elif [[ ! -f "${WORKING_DIRECTORY}/go.mod" ]]; then
-            skip="no go.mod in '${WORKING_DIRECTORY}' (multi-module runs are not re-measured)"
           else
             # same derivation as the workflow's Describe step; on another machine the
             # re-measurement would prove nothing
@@ -286,11 +285,19 @@ runs:
               procs="${BASH_REMATCH[1]}"
             fi
             regex="$(head -n 1 retest-plan.txt)"
-            mapfile -t pkgs < <(tail -n +2 retest-plan.txt)
-            echo "Re-measuring the flagged benchmarks in ${#pkgs[@]} package(s)"
-            if (cd "$WORKING_DIRECTORY" && GOMAXPROCS="$procs" \
-                go test -run '^$' -bench "$regex" -benchmem -timeout 15m "${pkgs[@]}") \
-                > "$GITHUB_WORKSPACE/retest.txt" 2> "$GITHUB_WORKSPACE/retest.log"; then
+            echo "Re-measuring the flagged benchmarks"
+            ok=true
+            : > "$GITHUB_WORKSPACE/retest.txt"
+            : > "$GITHUB_WORKSPACE/retest.log"
+            # one plan line per module directory; -count=3 so the median decides,
+            # not whichever way the single re-measurement happens to wobble
+            while IFS=$'\t' read -r dir pkg_list; do
+              # shellcheck disable=SC2086 # the package list is intentionally word-split
+              (cd "${WORKING_DIRECTORY}/${dir}" && GOMAXPROCS="$procs" \
+                go test -run '^$' -bench "$regex" -benchmem -count=3 -timeout 15m $pkg_list) \
+                >> "$GITHUB_WORKSPACE/retest.txt" 2>> "$GITHUB_WORKSPACE/retest.log" || ok=false
+            done < <(tail -n +2 retest-plan.txt)
+            if [[ "$ok" == "true" ]]; then
               status=0
               output="$(compare --retested retest.txt --save-verified verified.txt)" || status=$?
               printf '%s\n' "$output"
@@ -382,26 +389,6 @@ runs:
           cp "$OUTPUT_FILE" ./cache/baseline.txt
         fi
 
-    - name: Publish Benchmark Results to GitHub Pages
-      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.publish == 'true'
-      uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
-      with:
-        tool: go
-        output-file-path: ${{ inputs.output-file }}
-        benchmark-data-dir-path: ${{ inputs.benchmark-data-dir-path }}
-        fail-on-alert: false
-        github-token: ${{ inputs.github-token }}
-        # Alerting lives in Compare With Baseline, which knows that MB/s is
-        # bigger-is-better; this step would report throughput gains as regressions
-        comment-on-alert: false
-        summary-always: true
-        # Save the data to external file (GitHub Pages)
-        save-data-file: true
-        max-items-in-chart: ${{ inputs.max-items-in-chart }}
-        alert-threshold: ${{ inputs.alert-threshold }}
-        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
-        auto-push: true
-
     - name: Update Benchmark Results cache
       if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.comparable == 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -409,8 +396,20 @@ runs:
         path: ./cache
         key: ${{ steps.cache-key.outputs.key }}
 
-    - name: Sync Benchmark Page
-      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && inputs.sync-pages == 'true'
+    # Data publish and page sync in one commit. The data lands in the columnar
+    # v2 data.js; github-action-benchmark is gone (its per-run format had grown
+    # fiber's data.js to 85 MB, a third of GitHub's hard file limit).
+    - name: Publish Benchmark Results to GitHub Pages
+      if: >-
+        github.event_name != 'pull_request'
+        && github.ref_name == github.event.repository.default_branch
+        && (steps.cpu.outputs.publish == 'true' || inputs.sync-pages == 'true')
       uses: gofiber/.github/.github/actions/benchmark-pages@main
       with:
         data-dir: ${{ inputs.benchmark-data-dir-path }}
+        # empty when this runner's CPU is not the pinned one: page sync only
+        output-file: ${{ steps.cpu.outputs.publish == 'true' && inputs.output-file || '' }}
+        max-items: ${{ inputs.max-items-in-chart }}
+        go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+        sync-page: ${{ inputs.sync-pages }}
+        token: ${{ inputs.github-token }}

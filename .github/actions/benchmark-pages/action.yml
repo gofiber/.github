@@ -1,13 +1,33 @@
 name: benchmark-pages
 description: >-
-  Sync the shared benchmark page, the root redirect and (for multi-folder
-  layouts) folders.json plus per-package redirect stubs to the gh-pages branch.
+  Publish a benchmark run into the gh-pages data (columnar v2 data.js, legacy
+  files are converted on first contact) and sync the shared benchmark page, the
+  root redirect and (for multi-folder layouts) folders.json plus per-package
+  redirect stubs to the gh-pages branch. One commit, one push.
 
 inputs:
   data-dir:
     description: Directory on the gh-pages branch that holds the benchmark data
     required: false
     default: benchmarks
+  output-file:
+    description: >-
+      Raw `go test -bench` output to append to the benchmark data. Empty skips
+      the data publish and only syncs the page.
+    required: false
+    default: ''
+  max-items:
+    description: Number of runs kept in the benchmark data; required to publish
+    required: false
+    default: ''
+  go-force-package-suffix:
+    description: Always append the Go package to the series names
+    required: false
+    default: 'false'
+  sync-page:
+    description: Copy the shared page; storage's matrix legs publish data only
+    required: false
+    default: 'true'
   token:
     description: Token used to push to the gh-pages branch
     required: false
@@ -23,8 +43,12 @@ runs:
         path: .benchmark-pages-sync
         token: ${{ inputs.token }}
 
-    - name: Sync Page Assets
+    - name: Publish Data And Sync Page
       shell: bash
       env:
         DATA_DIR: ${{ inputs.data-dir }}
+        OUTPUT_FILE: ${{ inputs.output-file }}
+        MAX_ITEMS: ${{ inputs.max-items }}
+        FORCE_PACKAGE_SUFFIX: ${{ inputs.go-force-package-suffix }}
+        SYNC_PAGE: ${{ inputs.sync-page }}
       run: bash "${{ github.action_path }}/sync.sh" .benchmark-pages-sync

@@ -1,31 +1,47 @@
 #!/usr/bin/env bash
-# Syncs the shared benchmark page into a gh-pages checkout.
+# Publishes a benchmark run into the gh-pages data (optional) and syncs the
+# shared benchmark page into a gh-pages checkout, as one commit.
 #
-# $1        - path to the gh-pages checkout
-# $DATA_DIR - directory inside the checkout that holds the benchmark data
+# $1                     - path to the gh-pages checkout
+# $DATA_DIR              - directory inside the checkout that holds the benchmark data
+# $OUTPUT_FILE           - raw `go test -bench` output to publish; empty = sync only
+# $MAX_ITEMS             - runs to keep in the data (required when publishing)
+# $FORCE_PACKAGE_SUFFIX  - always append the Go package to the series names
+# $SYNC_PAGE             - copy the shared page; storage's matrix legs pass false
 set -euo pipefail
 
 CHECKOUT_DIR="$1"
 DATA_DIR="${DATA_DIR:-benchmarks}"
+OUTPUT_FILE="${OUTPUT_FILE:-}"
+SYNC_PAGE="${SYNC_PAGE:-true}"
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MARKER="gofiber-benchmark-redirect"
+
+# Commit metadata comes from the repository checkout the benchmarks ran on,
+# gathered before stepping into the gh-pages checkout.
+COMMIT_ID=""
+if [[ -n "$OUTPUT_FILE" ]]; then
+  [[ "$OUTPUT_FILE" = /* ]] || OUTPUT_FILE="$PWD/$OUTPUT_FILE"
+  COMMIT_ID="$(git log -1 --format=%H)"
+  COMMIT_TS="$(git log -1 --format=%cI)"
+  COMMIT_MSG="$(git log -1 --format=%s)"
+  REPO_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}"
+fi
 
 cd "$CHECKOUT_DIR"
 mkdir -p "$DATA_DIR"
 
-# One data.js per package (storage) or a single data.js next to the page?
-if compgen -G "$DATA_DIR/*/data.js" > /dev/null; then
-  LAYOUT=multi
-else
-  LAYOUT=single
+if [[ -n "$OUTPUT_FILE" ]]; then
+  python3 "$ACTION_DIR/publish.py" \
+    --data "$DATA_DIR/data.js" \
+    --output "$OUTPUT_FILE" \
+    --max-items "${MAX_ITEMS:?MAX_ITEMS is required to publish}" \
+    --repo-url "$REPO_URL" \
+    --commit-id "$COMMIT_ID" \
+    --commit-timestamp "$COMMIT_TS" \
+    --commit-message "$COMMIT_MSG" \
+    --force-package-suffix "${FORCE_PACKAGE_SUFFIX:-false}"
 fi
-
-# The shared page is always overwritten so central changes propagate on the
-# next benchmark run of every repository. Baking the layout in spares the page
-# a probing folders.json request that logs a 404 on single-layout repos.
-cp "$ACTION_DIR/index.html" "$DATA_DIR/index.html"
-sed -i.sync-bak "s/<body data-layout=\"auto\">/<body data-layout=\"$LAYOUT\">/" "$DATA_DIR/index.html"
-rm -f "$DATA_DIR/index.html.sync-bak"
 
 # Writes a redirect page, but never clobbers a hand-crafted file: the target
 # is only (re)written when it is missing, carries our marker, or - when
@@ -41,27 +57,52 @@ write_redirect() {
     "$MARKER" "$target" "$target" > "$file"
 }
 
-# Make the Pages root point at the benchmarks instead of returning a 404.
-write_redirect index.html "./${DATA_DIR}/"
+if [[ "$SYNC_PAGE" == "true" ]]; then
+  # One data.js per package (storage) or a single data.js next to the page?
+  if compgen -G "$DATA_DIR/*/data.js" > /dev/null; then
+    LAYOUT=multi
+  else
+    LAYOUT=single
+  fi
 
-# Multi-folder layout (one data.js per package): refresh folders.json and turn
-# the per-package stock pages into stubs that preselect the package filter.
-if [[ "$LAYOUT" == multi ]]; then
-  find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
-    | jq -R -s -c 'split("\n") | map(select(length > 0)) | sort' > "$DATA_DIR/folders.json"
-  while IFS= read -r pkg; do
-    write_redirect "$DATA_DIR/$pkg/index.html" "../#package=$pkg" replace-stock
-  done < <(find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+  # The shared page is always overwritten so central changes propagate on the
+  # next benchmark run of every repository. Baking the layout in spares the page
+  # a probing folders.json request that logs a 404 on single-layout repos.
+  cp "$ACTION_DIR/index.html" "$DATA_DIR/index.html"
+  sed -i.sync-bak "s/<body data-layout=\"auto\">/<body data-layout=\"$LAYOUT\">/" "$DATA_DIR/index.html"
+  rm -f "$DATA_DIR/index.html.sync-bak"
+
+  # Make the Pages root point at the benchmarks instead of returning a 404.
+  write_redirect index.html "./${DATA_DIR}/"
+
+  # Multi-folder layout (one data.js per package): refresh folders.json and turn
+  # the per-package stock pages into stubs that preselect the package filter.
+  if [[ "$LAYOUT" == multi ]]; then
+    find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
+      | jq -R -s -c 'split("\n") | map(select(length > 0)) | sort' > "$DATA_DIR/folders.json"
+    while IFS= read -r pkg; do
+      write_redirect "$DATA_DIR/$pkg/index.html" "../#package=$pkg" replace-stock
+    done < <(find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
+  fi
 fi
 
 git config --local user.email "github-actions[bot]@users.noreply.github.com"
 git config --local user.name "github-actions[bot]"
-git add -A -- "$DATA_DIR" index.html
+git add -A -- "$DATA_DIR"
+# the root redirect only exists on page syncs, and git add errors on a pathspec
+# that matches nothing
+if [[ -f index.html ]]; then
+  git add -A -- index.html
+fi
 if git diff --staged --quiet; then
   echo "Benchmark page already up to date"
   exit 0
 fi
-git commit -m "Sync benchmark page"
+if [[ -n "$COMMIT_ID" ]]; then
+  git commit -m "Update benchmark data for ${COMMIT_ID:0:7}"
+else
+  git commit -m "Sync benchmark page"
+fi
 
 # Parallel benchmark matrix legs may push to gh-pages at the same time.
 for attempt in 1 2 3 4 5; do

@@ -8,8 +8,15 @@ logic. Inputs are documented in [`action.yml`](action.yml).
 The comparison itself lives in [`compare.py`](compare.py) (stdlib only). It replaces
 the alerting half of `benchmark-action/github-action-benchmark`, which decides the
 "better" direction per tool instead of per unit and therefore reported every MB/s
-gain as a regression. `github-action-benchmark` is still used, but only to publish
-the charts.
+gain as a regression. The publishing half is gone too: the gh-pages data is written
+by [`benchmark-pages/publish.py`](../benchmark-pages/publish.py) in a columnar v2
+format (every series name once, values as a matrix) after gab's per-run format had
+grown fiber's data.js to 85 MB, a third of GitHub's hard file limit, for ~1.4 MB of
+information. A legacy data.js is converted automatically on the first publish, the
+page reads both formats, and the series names follow gab's extractor rules exactly
+so no chart forks at the cutover. Data publish and page sync land as one commit.
+The full per-run table gab wrote into the job summary on default-branch runs is
+gone with it; the report and the charts carry that information.
 
 ## Comment rules
 
@@ -87,6 +94,11 @@ The rules of the re-measurement:
   top-level benchmark (subtests ride along, `-bench` matches per slash level), but
   anything the second run measured beyond that is ignored, otherwise a fresh wobble
   could flag something the first run cleared.
+- The retest runs `-count=3` and the median decides, so a single wobble in the
+  re-measurement itself cannot confirm a false finding or clear a real one.
+- Multi-module (loop-mode) repos work too: the plan maps each package to the
+  top-level module that owns it and the retest runs inside that directory. A
+  package no module claims stays unverified and its finding stands.
 - A lone direction flip dies: a finding that shows slower on one measurement and
   faster on the other is reported as neither. When the posted report already
   agreed with one of the two directions, that side wins - two of three readings
@@ -99,9 +111,9 @@ The rules of the re-measurement:
 - The footer says what happened: `retest: 1/2 regressions, 1/1 improvements
   reproduced, 1 reported re-checked`.
 - The retest is skipped, and the first measurement stands, when more than 100
-  benchmarks moved (that is not a noise problem), on multi-module runs, when the
-  runner's CPU differs from the one the numbers came from, or without a Go
-  toolchain. The sharded path installs Go in the report job for exactly this.
+  benchmarks moved (that is not a noise problem), when the runner's CPU differs
+  from the one the numbers came from, or without a Go toolchain. The sharded path
+  installs Go in the report job for exactly this.
 
 ## Report format
 

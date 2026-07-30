@@ -12,9 +12,11 @@ the threshold. The report carries a fingerprint of its findings, so the next run
 can tell whether anything actually changed and keep quiet when it did not.
 """
 import argparse
+import glob
 import math
 import os
 import re
+import statistics
 import sys
 from collections import namedtuple
 
@@ -43,10 +45,9 @@ def bigger_is_better(unit):
     return unit.endswith("/s")
 
 
-def parse(stream):
-    """Read benchmark output into {(pkg, name, unit): value}."""
+def parse_runs(stream):
+    """Read benchmark output keeping every measurement, {(pkg, name, unit): [values]}."""
     results = {}
-    duplicates = 0
     pkg = ""
     for line in stream:
         header = PKG_RE.match(line)
@@ -66,11 +67,15 @@ def parse(stream):
                 number = float(value)
             except ValueError:
                 continue
-            key = Key(pkg, match.group("name"), unit)
-            if key in results:
-                duplicates += 1
-            results[key] = number
-    return results, duplicates
+            results.setdefault(Key(pkg, match.group("name"), unit), []).append(number)
+    return results
+
+
+def parse(stream):
+    """Read benchmark output into {(pkg, name, unit): value}, last measurement wins."""
+    runs = parse_runs(stream)
+    duplicates = sum(len(values) - 1 for values in runs.values())
+    return {key: values[-1] for key, values in runs.items()}, duplicates
 
 
 def ratio(unit, base, current):
@@ -314,17 +319,49 @@ def pairs(keys):
     return {(key.pkg, key.name) for key in keys}
 
 
-def write_plan(path, keys):
-    """Regex and package list for re-measuring only what moved, exact and cheap."""
+def modules(workdir):
+    """Modules at the root and one level down, {module path: relative directory}."""
+    found = {}
+    for mod in sorted(glob.glob(os.path.join(workdir, "go.mod")) + glob.glob(os.path.join(workdir, "*", "go.mod"))):
+        with open(mod, encoding="utf-8") as handle:
+            for line in handle:
+                match = re.match(r"module[ \t]+(\S+)", line)
+                if match:
+                    found[match.group(1)] = os.path.relpath(os.path.dirname(mod), workdir)
+                    break
+    return found
+
+
+def write_plan(path, keys, workdir):
+    """Regex and per-module package list for re-measuring only what moved.
+
+    Lines after the regex are `dir<TAB>pkg pkg ...`. Each package goes to the
+    module with the longest owning path; the root module and the loop-mode
+    subdirectories are all candidates (template carries both at once), and a
+    package no module claims is left unverified.
+    """
     named = sorted(pairs(keys))
     with open(path, "w", encoding="utf-8") as handle:
         if not named or len(named) > RETEST_MAX:
+            return
+        known = modules(workdir)
+        groups = {}
+        for pkg in sorted({pkg for pkg, _ in named}):
+            owner = max(
+                (mod for mod in known if pkg == mod or pkg.startswith(mod + "/")),
+                key=len,
+                default=None,
+            )
+            if owner:
+                groups.setdefault(known[owner], []).append(pkg)
+        if not groups:
             return
         # -bench matches per slash-separated level, so target the top-level
         # benchmark and take its subtests along
         roots = sorted({re.escape(name.split("/", 1)[0]) for _, name in named})
         handle.write("^(" + "|".join(roots) + ")$\n")
-        handle.writelines(pkg + "\n" for pkg in sorted({pkg for pkg, _ in named}))
+        for directory in sorted(groups):
+            handle.write(directory + "\t" + " ".join(groups[directory]) + "\n")
 
 
 def save_verified(path, results):
@@ -367,6 +404,8 @@ def main(argv=None):
     # second measurement is dropped; see the retest block in action.yml.
     parser.add_argument("--retest-plan", default="")
     parser.add_argument("--retested", default="")
+    # module root (or loop-mode parent) the plan's directories are relative to
+    parser.add_argument("--workdir", default=".")
     # The believed values, written in `go test -bench` shape. The default branch
     # stores them as the baseline, so a one-off spike in its own run does not
     # become the number every following PR is judged against.
@@ -412,7 +451,9 @@ def main(argv=None):
     retested = {}
     if args.retested and os.path.exists(args.retested):
         with open(args.retested, encoding="utf-8") as handle:
-            retested, _ = parse(handle)
+            # the retest runs -count=3; the median keeps a single wobble in the
+            # re-measurement from deciding the verification either way
+            retested = {key: statistics.median(values) for key, values in parse_runs(handle).items()}
     retest_note = ""
     if retested and to_verify:
         reported_side = {}
@@ -462,7 +503,7 @@ def main(argv=None):
             parts.append(f"{len(pairs(extra))} reported re-checked")
         retest_note = "retest: " + ", ".join(parts)
     if args.retest_plan:
-        write_plan(args.retest_plan, [] if retested else to_verify)
+        write_plan(args.retest_plan, [] if retested else to_verify, args.workdir)
     if args.save_verified and retested:
         save_verified(args.save_verified, current)
 

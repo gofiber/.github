@@ -56,9 +56,11 @@ def run(base, current, previous=None, retested=None, extra=()):
 
 
 def plan(base, current, previous=None):
-    """The retest plan a run writes: (regex, packages), or None when it stays empty."""
+    """The retest plan a run writes: (regex, module lines), or None when empty."""
     with tempfile.TemporaryDirectory() as tmp:
-        run(base, current, previous=previous, extra=["--retest-plan", f"{tmp}/plan"])
+        pathlib.Path(f"{tmp}/go.mod").write_text("module p\n", encoding="utf-8")
+        run(base, current, previous=previous,
+            extra=["--retest-plan", f"{tmp}/plan", "--workdir", tmp])
         lines = pathlib.Path(f"{tmp}/plan").read_text(encoding="utf-8").splitlines()
         return (lines[0], lines[1:]) if lines else None
 
@@ -307,13 +309,14 @@ def test_the_footer_links_both_compared_commits():
 
 def test_the_retest_plan_names_every_finding_in_both_directions():
     base = "pkg: p\nBenchmarkSlow-4\t10\t100 ns/op\nBenchmarkFast-4\t10\t100 ns/op\nBenchmarkFine-4\t10\t100 ns/op\n"
-    base += "pkg: q\nBenchmarkSlow-4\t10\t100 ns/op\n"
+    base += "pkg: p/q\nBenchmarkSlow-4\t10\t100 ns/op\n"
     current = "pkg: p\nBenchmarkSlow-4\t10\t300 ns/op\nBenchmarkFast-4\t10\t30 ns/op\nBenchmarkFine-4\t10\t100 ns/op\n"
-    current += "pkg: q\nBenchmarkSlow-4\t10\t300 ns/op\n"
+    current += "pkg: p/q\nBenchmarkSlow-4\t10\t300 ns/op\n"
     # a false improvement pollutes the comment just like a false regression fails it
-    regex, pkgs = plan(base, current)
+    regex, lines = plan(base, current)
     assert regex == "^(BenchmarkFast|BenchmarkSlow)$", regex
-    assert pkgs == ["p", "q"], pkgs
+    # both packages belong to the root module, so everything runs from "."
+    assert lines == [".\tp p/q"], lines
     # nothing moved, no plan; -bench '' would have run the whole suite again
     assert plan(base, base) is None
 
@@ -337,6 +340,44 @@ def test_the_retest_plan_targets_the_parent_of_a_subtest():
     regex, _ = plan(base, current)
     # -bench matches per slash level, an alternation of full paths would match nothing
     assert regex == "^(Benchmark_Ctx_Get)$", regex
+
+
+def test_the_plan_maps_packages_to_their_modules():
+    base = "pkg: example.com/mod/sub\nBenchmarkA-4\t10\t100 ns/op\n"
+    base += "pkg: example.com/other\nBenchmarkB-4\t10\t100 ns/op\n"
+    base += "pkg: example.com/root/util\nBenchmarkR-4\t10\t100 ns/op\n"
+    base += "pkg: example.com/lost\nBenchmarkC-4\t10\t100 ns/op\n"
+    current = base.replace("100 ns/op", "300 ns/op")
+    with tempfile.TemporaryDirectory() as tmp:
+        # template's shape: a module at the root AND one per subdirectory
+        pathlib.Path(f"{tmp}/go.mod").write_text("module example.com/root\n", encoding="utf-8")
+        for directory, module in (("ants", "example.com/mod"), ("beta", "example.com/other")):
+            pathlib.Path(f"{tmp}/{directory}").mkdir()
+            pathlib.Path(f"{tmp}/{directory}/go.mod").write_text(f"module {module}\n", encoding="utf-8")
+        run(base, current, extra=["--retest-plan", f"{tmp}/plan", "--workdir", tmp])
+        lines = pathlib.Path(f"{tmp}/plan").read_text(encoding="utf-8").splitlines()
+    # each package retests inside the module that owns it, and a package no
+    # module claims stays unverified rather than guessed at
+    assert lines[1:] == [
+        ".\texample.com/root/util",
+        "ants\texample.com/mod/sub",
+        "beta\texample.com/other",
+    ], lines
+
+
+def test_the_retest_takes_the_median_of_repeated_measurements():
+    base = bench(BenchmarkX="100 ns/op")
+    current = bench(BenchmarkX="300 ns/op")
+    # -count=3 prints three results; one of them repeating the wobble must not
+    # confirm the regression when the other two cleared it
+    noisy = "pkg: p\n" + "".join(f"BenchmarkX-4\t10\t{v} ns/op\n" for v in (110, 300, 115))
+    _, _, outputs = run(base, current, retested=noisy)
+    assert outputs["regressed"] == "false", outputs
+    # and two high readings confirm it with the median value, not the stray low one
+    settled = "pkg: p\n" + "".join(f"BenchmarkX-4\t10\t{v} ns/op\n" for v in (280, 300, 100))
+    _, report, outputs = run(base, current, retested=settled)
+    assert outputs["regressed"] == "true", outputs
+    assert "100 → 280 ns/op" in report, report
 
 
 def test_a_mass_regression_is_not_worth_a_retest():
