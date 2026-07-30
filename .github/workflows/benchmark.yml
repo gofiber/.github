@@ -54,7 +54,7 @@ on:
         default: ''
         type: string
       filter-parallel:
-        description: Drop Benchmark*_Parallel results before processing
+        description: Drop results whose benchmark name contains Parallel before processing
         required: false
         default: false
         type: boolean

@@ -16,7 +16,7 @@ inputs:
     required: false
     default: ''
   filter-parallel:
-    description: Drop Benchmark*_Parallel results before processing
+    description: Drop results whose benchmark name contains Parallel before processing
     required: false
     default: 'false'
   alert-min-ns:
@@ -69,7 +69,9 @@ runs:
       env:
         OUTPUT_FILE: ${{ inputs.output-file }}
       run: |
-        awk '!/^Benchmark.*_Parallel/' "$OUTPUT_FILE" > output_filtered.txt
+        # Match Parallel anywhere, not just after an underscore: sub-benchmarks
+        # spell it WithProxyCheckParallelMultipleSubnet and slipped through.
+        awk '!/^Benchmark.*Parallel/' "$OUTPUT_FILE" > output_filtered.txt
         mv output_filtered.txt "$OUTPUT_FILE"
 
     # NOTE: Benchmarks could change with different CPU types
