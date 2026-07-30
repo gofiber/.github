@@ -38,13 +38,22 @@ RETEST_MAX = 100
 # How the published history's series names carry package and metric, and how far
 # above a benchmark's own historic wobble its personal threshold sits. The margin
 # is deliberately thin: the wobble is already the tail of observed noise.
-# Calibrated on PR 3702's three surviving false positives (1.54-1.72x): p95
-# kills all three, p90 let one through by a hair.
+# Two complementary statistics, the floor is their maximum:
+# - p95 of adjacent-run ratios catches frequent step-to-step swings and is robust
+#   against single real perf changes in the history;
+# - the trimmed range of the recent window catches bimodal benchmarks whose rare
+#   machine-mode switches slip under any adjacent quantile (MarshalMsgcachedHeader
+#   sits at ~56 or ~94 ns/op and every switch looked like a 1.68x finding).
+# Calibrated on the four false positives observed across PR 3702 and the
+# main-vs-main dispatch runs: each statistic alone lets one through, the
+# combination kills all of them.
 HISTORY_METRIC_RE = re.compile(r" - [^ ]*/[^ ]*$")
 HISTORY_PKG_RE = re.compile(r" \(([^()]+)\)$")
 NOISE_MARGIN = 1.15
 NOISE_QUANTILE = 0.95
 NOISE_MIN_PAIRS = 5
+NOISE_WINDOW = 16
+NOISE_WINDOW_MIN = 8
 
 Key = namedtuple("Key", "pkg name unit")
 Change = namedtuple("Change", "key base current ratio")
@@ -163,16 +172,22 @@ def read_history(path):
         pkg = pkg_match.group(1) if pkg_match else ""
         bare = series[: pkg_match.start()] if pkg_match else series
         values = [v for v in data["values"][row] if v is not None]
+        parts = []
         ratios = []
         for before, after in zip(values, values[1:]):
             if before > 0 and after > 0:
                 step = after / before
                 ratios.append(step if step >= 1 else 1 / step)
-        if len(ratios) < NOISE_MIN_PAIRS:
-            continue
-        ratios.sort()
-        tail = ratios[int(NOISE_QUANTILE * (len(ratios) - 1))]
-        wobble[Key(pkg, bare, data["units"][row])] = rounded(tail)
+        if len(ratios) >= NOISE_MIN_PAIRS:
+            ratios.sort()
+            parts.append(ratios[int(NOISE_QUANTILE * (len(ratios) - 1))])
+        recent = sorted(v for v in values[-NOISE_WINDOW:] if v > 0)
+        if len(recent) >= NOISE_WINDOW_MIN:
+            # trimmed by one on each side, so a single outlier run does not
+            # inflate the floor for the next two weeks
+            parts.append(recent[-2] / recent[1])
+        if parts:
+            wobble[Key(pkg, bare, data["units"][row])] = rounded(max(parts))
     return wobble
 
 
@@ -688,6 +703,8 @@ def main(argv=None):
         ("regressed", "true" if worse else "false"),
         ("significant", "true" if worse or better else "false"),
         ("changed", "true" if changed else "false"),
+        # visible in the step log: an empty noise map means flat thresholds
+        ("noise", len(noise)),
     ):
         print(f"{key}={value}")
     return 1 if worse else 0

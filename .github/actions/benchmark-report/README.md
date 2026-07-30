@@ -83,14 +83,18 @@ anymore.
 
 A fixed threshold cannot serve 600 benchmarks at once: some sit rock-stable at
 ±2%, others (proxy, SendFile, anything with heavy setup) swing 1.5-2x between
-runs of identical code. The published v2 history knows which is which: the p95
-of a benchmark's adjacent-run ratios is its personal noise band, and its
-effective threshold is `max(alert-threshold, p95 * 1.15)` in both directions.
-The same slack applies before a reported finding counts as moved. This is the
-defense a same-machine retest cannot provide: PR 3702's three surviving false
-improvements (1.54-1.72x on benchmarks that historically wobble that far) all
-die against their own history. Fetched best effort from gh-pages; without it,
-the flat thresholds stand.
+runs of identical code. The published v2 history knows which is which. A
+benchmark's noise band is the maximum of two statistics - the p95 of its
+adjacent-run ratios (frequent step-to-step swings) and the trimmed range of its
+last 16 runs (bimodal benchmarks whose rare machine-mode switches slip under
+any adjacent quantile) - and its effective threshold is `max(alert-threshold,
+band * 1.15)` in both directions. The same slack applies before a reported
+finding counts as moved. This is the defense a same-machine retest cannot
+provide: all four false findings observed across PR 3702 and the main-vs-main
+dispatch runs (1.54-1.72x on benchmarks that historically move that far) die
+against their own history, and re-comparing those main-vs-main runs with the
+bands yields zero findings. Fetched best effort from gh-pages; without it, the
+flat thresholds stand (`noise=0` in the step log).
 
 ### Every deviation has to reproduce
 
