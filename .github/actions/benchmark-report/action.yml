@@ -101,6 +101,20 @@ runs:
           echo "Publish skipped, gh-pages is pinned to '${WANTED_CPU}'." >> "$GITHUB_STEP_SUMMARY"
           echo "::warning::gh-pages publish skipped, runner CPU '${CPU_MODEL}' is not the pinned '${WANTED_CPU}'"
         fi
+        # A baseline only lines up per benchmark when both sides saw the same CPU.
+        # Shard models are joined with '+', so a '+' means this run alone already
+        # spanned several, and which benchmark landed where is not reproducible.
+        COMPARABLE=true
+        if [[ "${CPU_MODEL}" == *+* ]]; then
+          COMPARABLE=false
+          echo "Comparison skipped, this run spanned multiple CPU models: ${CPU_MODEL}." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::benchmark comparison skipped, this run spanned multiple CPU models (${CPU_MODEL})"
+        elif [[ -n "${WANT}" && "${HAVE}" != *"${WANT}"* ]]; then
+          COMPARABLE=false
+          echo "Comparison skipped, CPU '${CPU_MODEL}' is not the pinned '${WANTED_CPU}'." >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::benchmark comparison skipped, runner CPU '${CPU_MODEL}' is not the pinned '${WANTED_CPU}'"
+        fi
+        echo "comparable=${COMPARABLE}" >> "$GITHUB_OUTPUT"
 
     - name: Get Default branch SHA
       id: base-sha
@@ -152,9 +166,13 @@ runs:
         ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
         OUTPUT_FILE: ${{ inputs.output-file }}
         CPU_MODEL: ${{ steps.cpu.outputs.model }}
+        COMPARABLE: ${{ steps.cpu.outputs.comparable }}
         ACTION_PATH: ${{ github.action_path }}
       run: |
         set -euo pipefail
+        if [[ "${COMPARABLE}" != "true" ]]; then
+          exit 0
+        fi
         if [[ ! -f ./cache/baseline.txt ]]; then
           echo "No cached baseline for CPU '${CPU_MODEL}', comparison skipped." >> "$GITHUB_STEP_SUMMARY"
           exit 0
@@ -228,7 +246,7 @@ runs:
         exit 1
 
     - name: Store Benchmark Results for Default branch
-      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.comparable == 'true'
       shell: bash
       env:
         OUTPUT_FILE: ${{ inputs.output-file }}
@@ -258,7 +276,7 @@ runs:
         auto-push: true
 
     - name: Update Benchmark Results cache
-      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
+      if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.comparable == 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ./cache
