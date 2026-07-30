@@ -157,6 +157,47 @@ runs:
         key: ${{ steps.cache-key.outputs.key }}
         restore-keys: ${{ steps.cache-key.outputs.prefix }}
 
+    # What the PR already says decides whether this run has anything to add, so the
+    # posted report is fetched before the comparison runs.
+    - name: Find Posted Report
+      id: posted
+      # commenting is not what this job gates on, so an API hiccup here stays a
+      # warning; posting is skipped for this run rather than guessing and duplicating
+      continue-on-error: true
+      if: >-
+        github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.fork != true
+        && steps.cpu.outputs.comparable == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+        MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
+      run: |
+        set -euo pipefail
+        # id, is it this module's report, is it any module's report
+        rows="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
+          --jq ".[] | [.id, (.body | startswith(\"${MARKER}\") | tostring), (.body | startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv")"
+        id=""
+        buried=false
+        while IFS=$'\t' read -r comment mine report; do
+          if [[ "$mine" == "true" ]]; then
+            id="$comment"
+            buried=false
+          elif [[ -n "$id" && "$report" != "true" ]]; then
+            # only foreign comments bury a report, the sibling modules' ones do not
+            buried=true
+          fi
+        done <<< "$rows"
+        {
+          echo "id=${id}"
+          echo "buried=${buried}"
+        } >> "$GITHUB_OUTPUT"
+        if [[ -n "$id" ]]; then
+          gh api "repos/${REPO}/issues/comments/${id}" --jq .body > previous.md
+        fi
+
     - name: Compare With Baseline
       id: compare
       shell: bash
@@ -168,6 +209,10 @@ runs:
         CPU_MODEL: ${{ steps.cpu.outputs.model }}
         COMPARABLE: ${{ steps.cpu.outputs.comparable }}
         ACTION_PATH: ${{ github.action_path }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        MATCHED_KEY: ${{ steps.cache.outputs.cache-matched-key }}
+        # the head of the PR, not the merge commit nobody can look up
+        COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       run: |
         set -euo pipefail
         if [[ "${COMPARABLE}" != "true" ]]; then
@@ -177,32 +222,41 @@ runs:
           echo "No cached baseline for CPU '${CPU_MODEL}', comparison skipped." >> "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
+        # restore-keys can hand back an older cache than the current default branch head,
+        # and a stale baseline is the usual reason a number looks off
+        BASELINE="${DEFAULT_BRANCH}"
+        SHA="${MATCHED_KEY##*-}"
+        if [[ "${#SHA}" -eq 40 ]]; then
+          BASELINE="${DEFAULT_BRANCH}@${SHA:0:7}"
+        fi
         status=0
         output="$(python3 "${ACTION_PATH}/compare.py" \
           --base ./cache/baseline.txt \
           --current "$OUTPUT_FILE" \
           --out report.md \
+          --previous previous.md \
           --threshold "$ALERT_THRESHOLD" \
           --improve-threshold "$IMPROVE_THRESHOLD" \
           --min-ns "$ALERT_MIN_NS" \
+          --commit "$COMMIT" \
+          --baseline "$BASELINE" \
           --hardware "$CPU_MODEL")" || status=$?
-        echo "$output"
+        printf '%s\n' "$output"
         # exit 1 means regressions, anything else means the script itself broke
         if [[ "$status" -gt 1 ]]; then
           exit "$status"
         fi
         cat report.md >> "$GITHUB_STEP_SUMMARY"
-        echo "compared=true" >> "$GITHUB_OUTPUT"
-        echo "regressed=$([[ "$status" -eq 1 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-        improvements="$(grep -oE 'improvements=[0-9]+' <<< "$output" | cut -d= -f2 || true)"
-        echo "significant=$([[ "$status" -eq 1 || "${improvements:-0}" -gt 0 ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+        printf '%s\ncompared=true\n' "$output" >> "$GITHUB_OUTPUT"
 
-    # A PR only gets a fresh comment when there is something to say; an existing
-    # comment is still updated (or cleared once neutral) so a fixed regression's
-    # alert does not linger. The default branch only reports actual problems.
+    # Comment rules in full: see README.md next to this file. Short version: refresh
+    # in place while the findings hold, comment again only once they really changed
+    # and the old report has been buried, and collapse whatever gets superseded.
     - name: Post Benchmark Report
+      continue-on-error: true
       if: >-
         steps.compare.outputs.compared == 'true'
+        && steps.posted.outcome != 'failure'
         && github.event.pull_request.head.repo.fork != true
         && (github.event_name == 'pull_request' || steps.compare.outputs.regressed == 'true')
       shell: bash
@@ -212,31 +266,42 @@ runs:
         PR: ${{ github.event.pull_request.number }}
         SHA: ${{ github.sha }}
         SIGNIFICANT: ${{ steps.compare.outputs.significant }}
+        CHANGED: ${{ steps.compare.outputs.changed }}
+        POSTED: ${{ steps.posted.outputs.id }}
+        BURIED: ${{ steps.posted.outputs.buried }}
         # per module, so the matrix legs of a multi-package repo do not overwrite each other
         MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
       run: |
         set -euo pipefail
+        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
         if [[ -z "$PR" ]]; then
-          { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
           gh api -X POST "repos/${REPO}/commits/${SHA}/comments" -F body=@comment.md > /dev/null
           exit 0
         fi
-        # --jq runs per page, so emit every match and let tail pick the newest
-        id="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-          --jq ".[] | select(.body | startswith(\"${MARKER}\")) | .id" | tail -n1)"
-        if [[ "$SIGNIFICANT" != "true" ]]; then
-          # nothing worth flagging; clear a stale alert if one is posted, else stay quiet
-          if [[ -n "$id" ]]; then
-            gh api -X DELETE "repos/${REPO}/issues/comments/${id}" > /dev/null
+        if [[ -z "$POSTED" ]]; then
+          if [[ "$SIGNIFICANT" == "true" ]]; then
+            gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
           fi
           exit 0
         fi
-        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
-        if [[ -n "$id" ]]; then
-          gh api -X PATCH "repos/${REPO}/issues/comments/${id}" -F body=@comment.md > /dev/null
-        else
-          gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
+        # the posted report already says "nothing to see here" and still holds
+        if [[ "$CHANGED" != "true" && "$SIGNIFICANT" != "true" ]]; then
+          exit 0
         fi
+        # editing sends no notification, so the numbers stay current for free as long
+        # as the findings hold or the report is still the last word in the thread
+        if [[ "$CHANGED" != "true" || "$BURIED" != "true" || "$SIGNIFICANT" != "true" ]]; then
+          gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@comment.md > /dev/null
+          exit 0
+        fi
+        url="$(gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md --jq .html_url)"
+        {
+          printf '%s\n\n<details><summary>Outdated benchmark report, superseded by <a href="%s">a newer run</a>.</summary>\n\n' \
+            "$MARKER" "$url"
+          grep -vF -- "$MARKER" previous.md || true
+          printf '\n</details>\n'
+        } > outdated.md
+        gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@outdated.md > /dev/null
 
     - name: Fail On Regression
       if: steps.compare.outputs.regressed == 'true' && github.event_name == 'pull_request'

@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# Drives the two comment steps of benchmark-report/action.yml against a fake `gh`:
+# which report gets refreshed, when a second one is posted instead, and what gets
+# collapsed. The steps are extracted from the action itself, so this cannot drift
+# from what actually ships.
+# Run from anywhere: bash .github/scripts/test/test-benchmark-comment.sh
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ACTION="$SCRIPT_DIR/../../actions/benchmark-report/action.yml"
+MARKER='<!-- benchmark-report:. -->'
+
+fails=0
+check() {
+  if [ "$2" = "$3" ]; then
+    echo "ok   $1"
+  else
+    echo "FAIL $1"
+    echo "       want: $2"
+    echo "       got:  $3"
+    fails=$((fails + 1))
+  fi
+}
+
+SANDBOX=$(mktemp -d)
+trap 'rm -rf "$SANDBOX"' EXIT
+WORK="$SANDBOX/work"
+mkdir -p "$WORK" "$SANDBOX/bin"
+
+extract() { # the run: block of a composite step, dedented
+  awk -v step="    - name: $1" '
+    $0 == step { found = 1; next }
+    found && /^      run: \|$/ { body = 1; next }
+    body { if ($0 ~ /^        / || $0 == "") { sub(/^        /, ""); print; next } else exit }
+  ' "$ACTION"
+}
+extract "Find Posted Report" > "$SANDBOX/find.sh"
+extract "Post Benchmark Report" > "$SANDBOX/post.sh"
+if [ ! -s "$SANDBOX/find.sh" ] || [ ! -s "$SANDBOX/post.sh" ]; then
+  echo "could not extract the comment steps from $ACTION"
+  exit 1
+fi
+
+cat > "$SANDBOX/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+# records every call and answers the two reads the steps make
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"/comments --paginate"*) cat "$GH_ROWS" ;;
+  *"issues/comments/"*"--jq .body"*) cat "$GH_BODY" ;;
+  *"--jq .html_url"*) echo "https://example.test/newest" ;;
+esac
+STUB
+chmod +x "$SANDBOX/bin/gh"
+PATH="$SANDBOX/bin:$PATH"
+
+export GH_LOG="$SANDBOX/gh.log" GH_ROWS="$SANDBOX/rows.tsv" GH_BODY="$SANDBOX/body.md"
+printf '%s\n\n%s\n' "$MARKER" "the old numbers" > "$GH_BODY"
+printf '%s\n' "the new numbers" > "$WORK/report.md"
+
+find_report() { # rows of "id<TAB>mine<TAB>any benchmark report", as the jq filter emits them
+  printf '%s\n' "$1" > "$GH_ROWS"
+  : > "$GH_LOG"
+  : > "$SANDBOX/outputs"
+  (
+    cd "$WORK" || exit 1
+    GITHUB_OUTPUT="$SANDBOX/outputs" GH_TOKEN=x REPO=o/r PR=7 MARKER="$MARKER" \
+      bash "$SANDBOX/find.sh"
+  )
+  tr '\n' ' ' < "$SANDBOX/outputs"
+}
+
+post() { # SIGNIFICANT CHANGED POSTED BURIED [PR]
+  : > "$GH_LOG"
+  rm -f "$WORK/outdated.md"
+  (
+    cd "$WORK" || exit 1
+    GH_TOKEN=x REPO=o/r PR="${5-7}" SHA=deadbeef MARKER="$MARKER" \
+      SIGNIFICANT="$1" CHANGED="$2" POSTED="$3" BURIED="$4" \
+      bash "$SANDBOX/post.sh"
+  )
+  grep -F -- '-X' "$GH_LOG" | sed -E 's/.*-X (POST|PATCH|DELETE) ([^ ]+).*/\1 \2/' | tr '\n' ';'
+}
+
+echo "--- finding the report already on the PR"
+check "no report yet" "id= buried=false " "$(find_report "1	false	false")"
+check "the newest own report wins" "id=9 buried=false " \
+  "$(find_report "$(printf '1\ttrue\ttrue\n9\ttrue\ttrue')")"
+check "a foreign comment buries it" "id=1 buried=true " \
+  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse')")"
+# storage posts one report per package, they must not bury each other every run
+check "a sibling module does not bury it" "id=1 buried=false " \
+  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\ttrue')")"
+check "chatter before the report does not count" "id=9 buried=false " \
+  "$(find_report "$(printf '1\tfalse\tfalse\n9\ttrue\ttrue')")"
+check "reposting resets the burial" "id=9 buried=false " \
+  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse\n9\ttrue\ttrue')")"
+
+echo "--- what lands on the PR"
+check "the first finding is posted" "POST repos/o/r/issues/7/comments;" "$(post true true '' false)"
+check "nothing to say, nothing posted" "" "$(post false true '' false)"
+# the point of the whole exercise: a commit that moved nothing must not comment again
+check "unchanged findings only refresh" "PATCH repos/o/r/issues/comments/42;" \
+  "$(post true false 42 false)"
+check "unchanged findings refresh even when buried" "PATCH repos/o/r/issues/comments/42;" \
+  "$(post true false 42 true)"
+check "changed findings refresh while the report is last" "PATCH repos/o/r/issues/comments/42;" \
+  "$(post true true 42 false)"
+check "changed findings behind chatter get a fresh comment" \
+  "POST repos/o/r/issues/7/comments;PATCH repos/o/r/issues/comments/42;" "$(post true true 42 true)"
+check "a fixed regression is cleared in place" "PATCH repos/o/r/issues/comments/42;" \
+  "$(post false true 42 true)"
+check "an already clean report stays untouched" "" "$(post false false 42 true)"
+check "a push comments on the commit" "POST repos/o/r/commits/deadbeef/comments;" \
+  "$(post true true '' false '')"
+
+echo "--- the superseded report"
+post true true 42 true > /dev/null
+check "is collapsed" "yes" \
+  "$(grep -qF '<details><summary>Outdated benchmark report' "$WORK/outdated.md" && echo yes || echo no)"
+check "links to its replacement" "yes" \
+  "$(grep -qF 'https://example.test/newest' "$WORK/outdated.md" && echo yes || echo no)"
+check "keeps what it said" "yes" \
+  "$(grep -qF 'the old numbers' "$WORK/outdated.md" && echo yes || echo no)"
+check "is still found by the marker" "yes" \
+  "$(head -1 "$WORK/outdated.md" | grep -qF "$MARKER" && echo yes || echo no)"
+check "carries the marker exactly once" "1" "$(grep -cF -- "$MARKER" "$WORK/outdated.md")"
+
+echo "--- the jq filter that feeds all of this"
+if command -v jq > /dev/null 2>&1; then
+  cat > "$SANDBOX/comments.json" <<'EOF'
+[{"id": 1, "body": "<!-- benchmark-report:. -->\n\nmine"},
+ {"id": 2, "body": "looks good to me"},
+ {"id": 3, "body": "<!-- benchmark-report:./middleware/redis -->\n\na sibling module"}]
+EOF
+  check "flags mine, the siblings and the rest apart" "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse\n3\tfalse\ttrue')" \
+    "$(jq -r ".[] | [.id, (.body | startswith(\"${MARKER}\") | tostring), (.body | startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv" \
+      "$SANDBOX/comments.json")"
+else
+  echo "skip jq filter check, jq is not installed"
+fi
+# the filter above is a copy, so make sure the action still asks for the same three fields
+check "the action still emits the same rows" "yes" \
+  "$(grep -qF 'startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv' "$ACTION" && echo yes || echo no)"
+
+echo
+if [ "$fails" -gt 0 ]; then
+  echo "$fails check(s) failed"
+  exit 1
+fi
+echo "all checks passed"
