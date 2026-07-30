@@ -111,9 +111,10 @@ The rules of the re-measurement:
 - The footer says what happened: `retest: 1/2 regressions, 1/1 improvements
   reproduced, 1 reported re-checked`.
 - The retest is skipped, and the first measurement stands, when more than 100
-  benchmarks moved (that is not a noise problem), when the runner's CPU differs
-  from the one the numbers came from, or without a Go toolchain. The sharded path
-  installs Go in the report job for exactly this.
+  benchmarks moved (that is not a noise problem) or when the runner's CPU differs
+  from the one the numbers came from. The sharded report job carries no Go
+  toolchain; the retest fetches one on demand, so quiet runs never pay the
+  ~15s setup-go cost, and only an unfetchable toolchain skips the retest.
 
 ## Report format
 

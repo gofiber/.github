@@ -262,8 +262,19 @@ runs:
         # plan file is empty when there is nothing, or too much, to ask.
         if [[ -s retest-plan.txt ]]; then
           skip=""
+          # The sharded report job carries no toolchain; fetch one only now that
+          # something must be re-measured, so quiet runs never pay for setup-go.
           if ! command -v go > /dev/null; then
-            skip="no Go toolchain on this runner"
+            GO_VERSION="$(curl -fsSL --max-time 15 'https://go.dev/dl/?mode=json' | jq -r '.[0].version')" || GO_VERSION=""
+            ARCH="$(uname -m)"
+            case "$ARCH" in aarch64) ARCH=arm64 ;; x86_64) ARCH=amd64 ;; esac
+            if [[ -n "$GO_VERSION" ]] && curl -fsSL --max-time 120 \
+                "https://go.dev/dl/${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -xz -C "${RUNNER_TEMP:-/tmp}"; then
+              export PATH="${RUNNER_TEMP:-/tmp}/go/bin:$PATH"
+            fi
+          fi
+          if ! command -v go > /dev/null; then
+            skip="no Go toolchain and none could be fetched"
           else
             # same derivation as the workflow's Describe step; on another machine the
             # re-measurement would prove nothing

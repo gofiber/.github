@@ -202,10 +202,19 @@ check "history survives the conversion" "yes" \
   "$(grep -q "aaaaaaa" <<< "$PUBLISHED" && echo yes || echo no)"
 check "the run records its CPU" "yes" \
   "$(grep -q '"cpu":"Ampere-1a (GOMAXPROCS=4)"' <<< "$PUBLISHED" && echo yes || echo no)"
+# capture before grepping: `git show | grep -q` dies of SIGPIPE under pipefail
+# once the file outgrows the 64K pipe buffer, which the page does
+DEPLOYED="$(git -C "$ORIGIN" show gh-pages:benchmarks/index.html)"
 check "the page is deployed with its layout baked" "yes" \
-  "$(git -C "$ORIGIN" show gh-pages:benchmarks/index.html | grep -q 'data-layout="single"' && echo yes || echo no)"
+  "$(grep -q 'data-layout="single"' <<< "$DEPLOYED" && echo yes || echo no)"
+# the baked version must be the hash of the data actually published, so a new
+# publish busts the CDN cache of data.js
+DATA_HASH="$(git -C "$ORIGIN" show gh-pages:benchmarks/data.js | git hash-object --stdin | cut -c1-12)"
+check "the page carries the published data's hash" "yes" \
+  "$(grep -q "data-version=\"$DATA_HASH\"" <<< "$DEPLOYED" && echo yes || echo no)"
+ROOT="$(git -C "$ORIGIN" show gh-pages:index.html)"
 check "the root redirect exists" "yes" \
-  "$(git -C "$ORIGIN" show gh-pages:index.html | grep -q 'gofiber-benchmark-redirect' && echo yes || echo no)"
+  "$(grep -q 'gofiber-benchmark-redirect' <<< "$ROOT" && echo yes || echo no)"
 
 # a data-only leg must not touch the page
 git -C "$PAGES" pull -q --rebase > /dev/null 2>&1
@@ -244,6 +253,45 @@ check "a sync-only run says so" "Sync benchmark page" \
   "$(git -C "$ORIGIN" log gh-pages -1 --format=%s)"
 check "an unchanged page is not committed again" "yes" \
   "$(grep -q "already up to date" "$SANDBOX/sync4.log" && echo yes || echo no)"
+
+# ---------- multi-folder layout: per-package cache busting ----------
+if command -v jq > /dev/null 2>&1; then
+  MORIGIN="$SANDBOX/morigin.git"
+  git init -q --bare "$MORIGIN"
+  MSEED="$SANDBOX/mseed"
+  git init -q "$MSEED"
+  (
+    cd "$MSEED"
+    git_q checkout --orphan gh-pages
+    mkdir -p benchmarks/redis benchmarks/nats
+    cp "$SANDBOX/legacy-data.js" benchmarks/redis/data.js
+    printf 'window.BENCHMARK_DATA = {"lastUpdate": 2, "repoUrl": "r", "entries": {"Benchmark": []}}\n' \
+      > benchmarks/nats/data.js
+    git_q add -A
+    git_q commit -m "seed"
+    git_q push "$MORIGIN" gh-pages
+  )
+  MPAGES="$SANDBOX/mpages"
+  git clone -q "$MORIGIN" "$MPAGES" 2> /dev/null
+  git -C "$MPAGES" checkout -q gh-pages
+  (
+    cd "$REPO"
+    DATA_DIR=benchmarks SYNC_PAGE=true \
+      bash "$PAGES_DIR/sync.sh" "$MPAGES" > "$SANDBOX/msync.log" 2>&1
+  ) || { echo "FAIL multi sync.sh exited non-zero"; cat "$SANDBOX/msync.log"; fails=$((fails + 1)); }
+  MFOLDERS="$(git -C "$MORIGIN" show gh-pages:benchmarks/folders.json)"
+  REDIS_HASH="$(git -C "$MORIGIN" show gh-pages:benchmarks/redis/data.js | git hash-object --stdin | cut -c1-12)"
+  NATS_HASH="$(git -C "$MORIGIN" show gh-pages:benchmarks/nats/data.js | git hash-object --stdin | cut -c1-12)"
+  check "folders.json maps each package to its own data hash" "yes" \
+    "$(grep -q "\"redis\":\"$REDIS_HASH\"" <<< "$MFOLDERS" && grep -q "\"nats\":\"$NATS_HASH\"" <<< "$MFOLDERS" && echo yes || echo no)"
+  check "unchanged packages keep their hash" "different" \
+    "$([ "$REDIS_HASH" != "$NATS_HASH" ] && echo different || echo same)"
+  MDEPLOYED="$(git -C "$MORIGIN" show gh-pages:benchmarks/index.html)"
+  check "the multi page is baked as multi" "yes" \
+    "$(grep -q 'data-layout="multi"' <<< "$MDEPLOYED" && echo yes || echo no)"
+else
+  echo "skip multi-layout checks, jq is not installed"
+fi
 
 echo
 if [ "$fails" -gt 0 ]; then

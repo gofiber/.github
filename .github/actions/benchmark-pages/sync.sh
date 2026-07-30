@@ -66,11 +66,19 @@ if [[ "$SYNC_PAGE" == "true" ]]; then
     LAYOUT=single
   fi
 
+  # A hash over the data busts the Pages CDN cache: the page and its data are
+  # republished together, so a fresh page never renders a cached stale data.js.
+  DATA_HASH=""
+  if compgen -G "$DATA_DIR/data.js" > /dev/null || compgen -G "$DATA_DIR/*/data.js" > /dev/null; then
+    DATA_HASH="$(find "$DATA_DIR" -maxdepth 2 -name data.js | sort | xargs cat | git hash-object --stdin | cut -c1-12)"
+  fi
+
   # The shared page is always overwritten so central changes propagate on the
   # next benchmark run of every repository. Baking the layout in spares the page
   # a probing folders.json request that logs a 404 on single-layout repos.
   cp "$ACTION_DIR/index.html" "$DATA_DIR/index.html"
-  sed -i.sync-bak "s/<body data-layout=\"auto\">/<body data-layout=\"$LAYOUT\">/" "$DATA_DIR/index.html"
+  sed -i.sync-bak "s/<body data-layout=\"auto\" data-version=\"\">/<body data-layout=\"$LAYOUT\" data-version=\"$DATA_HASH\">/" \
+    "$DATA_DIR/index.html"
   rm -f "$DATA_DIR/index.html.sync-bak"
 
   # Make the Pages root point at the benchmarks instead of returning a 404.
@@ -78,9 +86,19 @@ if [[ "$SYNC_PAGE" == "true" ]]; then
 
   # Multi-folder layout (one data.js per package): refresh folders.json and turn
   # the per-package stock pages into stubs that preselect the package filter.
+  # folders.json maps folder -> hash of ITS data.js, so the page only re-fetches
+  # the packages whose data actually changed; the global body hash merely busts
+  # folders.json itself.
   if [[ "$LAYOUT" == multi ]]; then
-    find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; \
-      | jq -R -s -c 'split("\n") | map(select(length > 0)) | sort' > "$DATA_DIR/folders.json"
+    while IFS= read -r pkg; do
+      hash=""
+      if [[ -f "$DATA_DIR/$pkg/data.js" ]]; then
+        hash="$(git hash-object "$DATA_DIR/$pkg/data.js" | cut -c1-12)"
+      fi
+      printf '%s\t%s\n' "$pkg" "$hash"
+    done < <(find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort) \
+      | jq -R -s -c 'split("\n") | map(select(length > 0) | split("\t") | {(.[0]): (.[1] // "")}) | add // {}' \
+      > "$DATA_DIR/folders.json"
     while IFS= read -r pkg; do
       write_redirect "$DATA_DIR/$pkg/index.html" "../#package=$pkg" replace-stock
     done < <(find "$DATA_DIR" -mindepth 1 -maxdepth 1 -type d -exec basename {} \;)
