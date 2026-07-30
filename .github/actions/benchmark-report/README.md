@@ -64,6 +64,12 @@ threshold, an already reported one by how far it moved. Judging both by the
 threshold would let a result sitting on the line drop in and out of the list on
 noise alone, and every one of those flips would be a comment.
 
+One exception cuts through the hysteresis: a posted finding whose reported
+strength would not be flagged under today's bars (noise floors landed, a
+threshold was raised) is a claim the system no longer stands behind. It is
+re-verified and the comment is patched down to the current state, instead of
+showing a retracted claim forever.
+
 The tolerance exists because the runner pools are not hardware-homogeneous and an
 untouched benchmark wobbles by double digit percentages between runs. Keying the
 baseline by CPU model and skipping the comparison for runs that spanned several of

@@ -466,15 +466,37 @@ def test_a_flip_backed_by_the_report_keeps_the_reported_side():
 
 def test_verified_values_can_seed_the_next_baseline():
     base = bench(BenchmarkX="100 ns/op", BenchmarkY="100 ns/op")
-    current = bench(BenchmarkX="300 ns/op", BenchmarkY="100 ns/op")
+    current = bench(BenchmarkX="300 ns/op", BenchmarkY="100 ns/op") + "ok  \tp\t42.5s\n"
     with tempfile.TemporaryDirectory() as tmp:
         run(base, current, retested=bench(BenchmarkX="110 ns/op"),
             extra=["--save-verified", f"{tmp}/verified"])
-        with open(f"{tmp}/verified", encoding="utf-8") as handle:
-            saved, _ = compare.parse(handle)
+        text = pathlib.Path(f"{tmp}/verified").read_text(encoding="utf-8")
+        saved, _ = compare.parse(io.StringIO(text))
     # the spike was re-measured, its verified value goes in; the rest is untouched
     assert saved[compare.Key("p", "BenchmarkX", "ns/op")] == 110.0
     assert saved[compare.Key("p", "BenchmarkY", "ns/op")] == 100.0
+    # the package wall times survive: the shard weighing reads them from the
+    # stored baseline, and losing them silently disabled the time balance
+    assert "ok  \tp\t42.5s" in text, text
+
+
+def test_a_posted_finding_below_todays_bar_is_retracted():
+    # PR 3702 aftermath: the comment claims 1.6x faster, posted before noise bars
+    # existed; under today's bars that strength is noise, so the claim must go
+    base = bench(BenchmarkX="195 ns/op")
+    _, first, _ = run(base, bench(BenchmarkX="122 ns/op"))
+    assert "faster" in first
+    wobbly = history({"BenchmarkX": [100, 160, 95, 170, 105, 165, 98, 175, 102, 168]})
+    _, report, outputs = run_history(base, bench(BenchmarkX="122 ns/op"), wobbly, previous=first)
+    assert outputs["significant"] == "false", outputs
+    # changed fires although the numbers sit exactly where the report says: the
+    # comment gets patched down to the all-clear instead of showing it forever
+    assert outputs["changed"] == "true", outputs
+    assert "No significant benchmark change" in report, report
+    # a posted finding strong enough for its bar keeps the usual hysteresis
+    _, strong, _ = run(base, bench(BenchmarkX="40 ns/op"))
+    _, _, outputs = run_history(base, bench(BenchmarkX="40 ns/op"), wobbly, previous=strong)
+    assert outputs["changed"] == "false", outputs
 
 
 def test_saved_names_and_values_survive_the_round_trip():

@@ -111,6 +111,19 @@ def test_weigh_survives_garbage():
     assert sb.weigh("not benchmark output at all\nok broken") == {}
 
 
+def test_weigh_reads_the_verified_baseline_shape():
+    # a retested default-branch run stores save_verified output: serialized bench
+    # lines with a sacrificial -1 suffix, and every ok line appended at the end
+    verified = "pkg: github.com/x/root\n"
+    verified += "Benchmark_Big/a-1\t1\t100 ns/op\n"
+    verified += "Benchmark_Big/b-1\t1\t100 ns/op\n"
+    verified += "Benchmark_Small-1\t1\t100 ns/op\n"
+    verified += "ok  \tgithub.com/x/root\t30.0s\n"
+    weights = sb.weigh(verified)
+    assert weights["github.com/x/root Benchmark_Big"] == 20.0, weights
+    assert weights["github.com/x/root Benchmark_Small"] == 10.0, weights
+
+
 def test_weighted_shard_flattens_where_round_robin_cannot():
     pairs = [("p", f"Benchmark{i}") for i in range(8)]
     weights = {"p Benchmark0": 40.0}

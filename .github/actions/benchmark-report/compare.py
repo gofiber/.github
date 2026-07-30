@@ -475,11 +475,14 @@ def write_details(path, base, first_run, retested, to_verify, flagged_worse, fla
         handle.write("\n".join(lines) + "\n")
 
 
-def save_verified(path, results):
+def save_verified(path, results, keep=()):
     """The believed values in `go test -bench` shape, so parse() reads them back.
 
     Every name gets a sacrificial -1 suffix: parse() strips one trailing -N (the
     GOMAXPROCS count on real output), and a bare name ending in -8 would lose it.
+    `keep` carries raw lines to append verbatim - the `ok <pkg> <secs>` lines,
+    which the shard weighing reads from the stored baseline and which this
+    serialization would otherwise lose.
     """
     grouped = {}
     for key, value in results.items():
@@ -491,6 +494,8 @@ def save_verified(path, results):
                 units.sort(key=lambda pair: unit_rank(pair[0]))
                 columns = "\t".join(f"{value:.10g} {unit}" for unit, value in units)
                 handle.write(f"{name}-1\t1\t{columns}\n")
+        for line in keep:
+            handle.write(line.rstrip("\n") + "\n")
 
 
 def main(argv=None):
@@ -553,11 +558,19 @@ def main(argv=None):
     flagged_worse = {c.key for c in worse}
     flagged_better = {c.key for c in better}
     stale = set()
+    disowned = set()
     for text, before in reported.items():
         key = text_key(text)
+        if key is None:
+            continue
+        # a posted finding whose reported strength would not be flagged under
+        # today's bars (noise floors, raised thresholds) is a claim to retract,
+        # not a number to keep refreshing
+        bar, improve_bar = bars(key, args.threshold, improve_threshold, noise)
+        if (before > 1 and before < bar) or (before and before < 1 and 1 / before < improve_bar):
+            disowned.add(key)
         if (
-            key is not None
-            and key in current
+            key in current
             and key in base
             and not near(
                 before,
@@ -566,6 +579,7 @@ def main(argv=None):
             )
         ):
             stale.add(key)
+    stale |= {key for key in disowned if key in current and key in base}
     to_verify = flagged_worse | flagged_better | stale
 
     retested = {}
@@ -633,7 +647,9 @@ def main(argv=None):
     if args.retest_plan:
         write_plan(args.retest_plan, [] if retested else to_verify, args.workdir)
     if args.save_verified and retested:
-        save_verified(args.save_verified, current)
+        with open(args.current, encoding="utf-8") as handle:
+            package_times = [line for line in handle if re.match(r"ok\s+\S+\s+[\d.]+s", line)]
+        save_verified(args.save_verified, current, package_times)
 
     shared = len(current.keys() & base.keys())
     ends = [linked(args.commit, args.repo_url)] if args.commit else []
@@ -662,7 +678,7 @@ def main(argv=None):
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(report)
 
-    changed = not nothing_new(
+    changed = bool(disowned) or not nothing_new(
         previous_digest, digest(worse + better), factors(base, current), args.tolerance, noise
     )
 
