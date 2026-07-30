@@ -36,8 +36,8 @@ on:
       max-items-in-chart:
         description: >-
           Number of runs kept in the gh-pages data.js. Pick roughly the amount of
-          default-branch pushes in 3 months; this also keeps the file well below
-          GitHub's 100 MB per-file push limit (the action never prunes by default).
+          default-branch pushes in 9 months; the columnar data format keeps even
+          long histories at a few MB.
         required: true
         type: number
       alert-threshold:
