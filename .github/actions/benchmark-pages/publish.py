@@ -189,6 +189,8 @@ def main(argv=None):
     parser.add_argument("--commit-id", default="")
     parser.add_argument("--commit-timestamp", default="")
     parser.add_argument("--commit-message", default="")
+    # the CPU the run measured on; a model change is where chart jumps come from
+    parser.add_argument("--cpu", default="")
     parser.add_argument("--force-package-suffix", default="false")
     # convert/trim without appending a run, for one-off migrations
     parser.add_argument("--convert", action="store_true")
@@ -212,6 +214,8 @@ def main(argv=None):
             "url": f"{data['repoUrl']}/commit/{args.commit_id}" if data["repoUrl"] else "",
             "message": args.commit_message.split("\n")[0],
         }
+        if args.cpu:
+            commit["cpu"] = args.cpu
         append(data, results, commit)
         data["lastUpdate"] = args.now_ms or int(time.time() * 1000)
     if args.max_items > 0:

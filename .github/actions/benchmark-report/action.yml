@@ -411,5 +411,6 @@ runs:
         output-file: ${{ steps.cpu.outputs.publish == 'true' && inputs.output-file || '' }}
         max-items: ${{ inputs.max-items-in-chart }}
         go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
+        cpu-model: ${{ steps.cpu.outputs.model }}
         sync-page: ${{ inputs.sync-pages }}
         token: ${{ inputs.github-token }}

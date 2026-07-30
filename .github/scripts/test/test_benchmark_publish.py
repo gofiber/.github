@@ -143,12 +143,15 @@ def test_publish_appends_and_a_second_run_lines_up():
             "--commit-message", "fix: second\n\nmore", "--force-package-suffix", "true",
             "--now-ms", "1753900000000",
         ]
-        code, printed = run_main(argv)
+        code, printed = run_main(argv + ["--cpu", "Ampere-1a (GOMAXPROCS=4)"])
         assert code == 0, printed
         data = written(data_path)
         assert len(data["runs"]) == 2
         assert data["runs"][1]["message"] == "fix: second"
         assert data["runs"][1]["url"].endswith("/commit/" + "b" * 40)
+        # the CPU rides along per run; legacy runs simply have none
+        assert data["runs"][1]["cpu"] == "Ampere-1a (GOMAXPROCS=4)"
+        assert "cpu" not in data["runs"][0]
         assert data["lastUpdate"] == 1753900000000
         row = data["names"].index("Benchmark_NewError (github.com/gofiber/fiber/v3) - ns/op")
         # legacy run and fresh run land in the same series, no fork at the cutover

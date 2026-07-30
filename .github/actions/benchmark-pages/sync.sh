@@ -40,6 +40,7 @@ if [[ -n "$OUTPUT_FILE" ]]; then
     --commit-id "$COMMIT_ID" \
     --commit-timestamp "$COMMIT_TS" \
     --commit-message "$COMMIT_MSG" \
+    --cpu "${CPU_MODEL:-}" \
     --force-package-suffix "${FORCE_PACKAGE_SUFFIX:-false}"
 fi
 

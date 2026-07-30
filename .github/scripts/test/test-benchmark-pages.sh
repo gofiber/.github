@@ -186,7 +186,7 @@ git -C "$PAGES" checkout -q gh-pages
 (
   cd "$REPO"
   DATA_DIR=benchmarks OUTPUT_FILE="$SANDBOX/output.txt" MAX_ITEMS=5 \
-    FORCE_PACKAGE_SUFFIX=true SYNC_PAGE=true \
+    FORCE_PACKAGE_SUFFIX=true SYNC_PAGE=true CPU_MODEL="Ampere-1a (GOMAXPROCS=4)" \
     GITHUB_SERVER_URL=https://example.test GITHUB_REPOSITORY=gofiber/fiber \
     bash "$PAGES_DIR/sync.sh" "$PAGES" > "$SANDBOX/sync.log" 2>&1
 ) || { echo "FAIL sync.sh exited non-zero"; cat "$SANDBOX/sync.log"; fails=$((fails + 1)); }
@@ -200,6 +200,8 @@ check "the new run is appended" "yes" \
   "$(grep -q "$SHA" <<< "$PUBLISHED" && echo yes || echo no)"
 check "history survives the conversion" "yes" \
   "$(grep -q "aaaaaaa" <<< "$PUBLISHED" && echo yes || echo no)"
+check "the run records its CPU" "yes" \
+  "$(grep -q '"cpu":"Ampere-1a (GOMAXPROCS=4)"' <<< "$PUBLISHED" && echo yes || echo no)"
 check "the page is deployed with its layout baked" "yes" \
   "$(git -C "$ORIGIN" show gh-pages:benchmarks/index.html | grep -q 'data-layout="single"' && echo yes || echo no)"
 check "the root redirect exists" "yes" \

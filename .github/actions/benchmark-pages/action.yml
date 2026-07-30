@@ -24,6 +24,10 @@ inputs:
     description: Always append the Go package to the series names
     required: false
     default: 'false'
+  cpu-model:
+    description: CPU the run measured on, stored per run so chart jumps are explainable
+    required: false
+    default: ''
   sync-page:
     description: Copy the shared page; storage's matrix legs publish data only
     required: false
@@ -50,5 +54,6 @@ runs:
         OUTPUT_FILE: ${{ inputs.output-file }}
         MAX_ITEMS: ${{ inputs.max-items }}
         FORCE_PACKAGE_SUFFIX: ${{ inputs.go-force-package-suffix }}
+        CPU_MODEL: ${{ inputs.cpu-model }}
         SYNC_PAGE: ${{ inputs.sync-page }}
       run: bash "${{ github.action_path }}/sync.sh" .benchmark-pages-sync

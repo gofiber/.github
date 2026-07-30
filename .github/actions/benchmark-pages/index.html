@@ -468,6 +468,9 @@
             sha: c.id ? String(c.id).slice(0, 7) : '',
             url: c.url || '',
             msg: c.message ? String(c.message).split('\n')[0] : '',
+            // v2 data records the CPU per run; a model change is where the
+            // unexplained chart jumps used to come from
+            cpu: c.cpu || '',
           };
         });
 
@@ -547,7 +550,7 @@
           benches.push({ name: data.names[n], value: value, unit: data.units[n] });
         }
         return {
-          commit: { id: run.id, timestamp: run.timestamp, url: run.url, message: run.message },
+          commit: { id: run.id, timestamp: run.timestamp, url: run.url, message: run.message, cpu: run.cpu },
           benches: benches,
         };
       });
@@ -1077,6 +1080,7 @@
                     const run = runs[items[0].dataIndex] || {};
                     const lines = [run.date + '  ' + run.sha];
                     if (run.msg) lines.push(run.msg.slice(0, 60));
+                    if (run.cpu) lines.push(run.cpu);
                     return lines;
                   },
                   label: function (item) {
