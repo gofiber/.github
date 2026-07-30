@@ -39,8 +39,10 @@ Applies labels from the shared configuration in this repository using the [`gofi
 
 ### dependabot-automerge
 Automatically enables auto-merge on Dependabot pull requests.
-- Secrets: optional `github-token` with `pull_requests:write` and `contents:write` permissions.
+- Inputs: `match_pattern` (regex of status check names to wait for, default `test|discover|go`), `wait-delay` (seconds before the first poll, default `60`).
+- Secrets: `github-token` with `pull_requests:write` and `contents:write`. Declared optional, but a PAT is required in practice: the Actions bot may not approve a pull request, so the default token cannot get the merge through.
 - Only runs when the actor is `dependabot[bot]`.
+- Merges minor and patch updates, plus `github_actions` majors - but not for four glue actions, and not in this repository, whose reusable workflows no pull request check here exercises.
 
 ### security-golang
 Runs Go security checks.

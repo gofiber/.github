@@ -24,6 +24,11 @@ permissions:
   contents: write
   pull-requests: write
 
+# a rebase supersedes the previous run, which would otherwise keep polling a dead head
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   wait_for_checks:
     runs-on: ubuntu-latest
@@ -51,26 +56,30 @@ jobs:
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
-      # github_actions majors automerge too, except glue actions whose outputs feed
-      # other jobs and which never run in PR CI - their majors stay manual.
+      # github_actions majors automerge too, except glue actions whose outputs feed other
+      # jobs, and never in .github itself: its reusables never run in its own PR CI, and
+      # every repo pins them @main, so a bad merge breaks the org at once.
       - name: Enable auto-merge for Dependabot PRs
         if: >-
           ${{ steps.metadata.outputs.update-type == 'version-update:semver-minor' ||
               steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
               (steps.metadata.outputs.update-type == 'version-update:semver-major' &&
                steps.metadata.outputs.package-ecosystem == 'github_actions' &&
+               github.repository != 'gofiber/.github' &&
                !contains(steps.metadata.outputs.dependency-names, 'dorny/paths-filter') &&
                !contains(steps.metadata.outputs.dependency-names, 'dependabot/fetch-metadata') &&
                !contains(steps.metadata.outputs.dependency-names, 'poseidon/wait-for-status-checks') &&
                !contains(steps.metadata.outputs.dependency-names, 'release-drafter/release-drafter')) }}
         run: |
           gh pr review --approve "$PR_URL"
+          # retries absorb a check landing after the merge attempt (unstable status) and a
+          # concurrent merge moving the base; measured stragglers ran 106s and 179s late
           n=0
           until gh pr merge --auto --merge "$PR_URL"; do
             n=$((n + 1))
-            [ "$n" -ge 5 ] && exit 1
-            echo "merge failed (likely base branch race), retrying in 10s..."
-            sleep 10
+            [ "$n" -ge 10 ] && exit 1
+            echo "merge failed ($n/10), retrying in 30s..."
+            sleep 30
           done
         env:
           PR_URL: ${{github.event.pull_request.html_url}}

@@ -12,6 +12,7 @@ Caller counts read straight from the workflow files of all 34 organisation repos
 
 | Workflow | Repos calling it |
 | --- | --- |
+| `dependabot-automerge.yml` | 12 |
 | `sync-sponsors.yml` | 11 |
 | `auto-labeler.yml` | 9 |
 | `dependabot-on-demand.yml` | 9 |
@@ -24,17 +25,19 @@ Caller counts read straight from the workflow files of all 34 organisation repos
 | `go-test.yml` | **0** |
 | `markdown-check.yml` | **0** |
 | `security-golang.yml` | **0** |
-| `dependabot-automerge.yml` | **0** |
 
-The last four exist but were never rolled out. What actually runs today are the
-repo-local `test.yml`, `markdown.yml`, `vulncheck.yml` and `dependabot_automerge.yml`.
-Changes to the four uncalled workflows are staged for a rollout, not live.
+The last three exist but were never rolled out. What actually runs today are the
+repo-local `test.yml`, `markdown.yml` and `vulncheck.yml`. Changes to the three uncalled
+workflows are staged for a rollout, not live.
 
-### What blocks the `dependabot-automerge.yml` rollout
+### What the `dependabot-automerge.yml` rollout took
 
-Two things, both per repo:
+Every active repo that has the workflow now calls the central one; `website` is the only
+active repo without it, and `fiber-v2` has no such file either. Two things had to be
+handled per repo, both easy to get wrong:
 
-1. **The token.** All twelve local copies use `secrets.PR_TOKEN`, a PAT. The central
+1. **The token.** All twelve local copies used `secrets.PR_TOKEN`, a PAT, and the callers
+   still pass it. The central
    workflow falls back to `github.token`, and `gh pr review --approve` fails with it -
    the Actions bot may not approve a pull request. `secrets: inherit` does **not**
    fix this: it passes secrets under their original names, while the central workflow
@@ -68,9 +71,42 @@ jobs:
       github-token: ${{ secrets.PR_TOKEN }}
 ```
 
-One deliberate behaviour change is left to decide: the central workflow auto-merges
-**major** `github_actions` updates (except four glue actions), the local copies never
-do. `fiber-v2` has no such file at all.
+Check names change with the move: a called workflow prefixes its jobs, so
+`wait_for_checks` becomes `automerge / wait_for_checks`. Safe here, because no repo
+requires status checks, neither through branch protection nor through a ruleset. Worth
+re-checking before a similar move, and worth checking that no `match_pattern` matches the
+new names - the wait job would otherwise wait on itself.
+
+### Major updates: everywhere except this repository
+
+The central workflow auto-merges **major** `github_actions` updates, which the local
+copies never did, except for four glue actions and except in `gofiber/.github` itself.
+The asymmetry is deliberate. In the twelve leaf repos an action sits in a workflow that
+runs on pull requests, so a broken major is caught by the same CI that gates the merge.
+This repository's own pull request checks are `test-actions.yml` (`scripts`, `discover`,
+`go`) and `test-release-gate.yml`, and they use only `actions/checkout` and
+`actions/setup-go`. The twelve other actions in the reusables sit behind `workflow_call`
+and never run on a pull request here, while every repo pins them `@main`, so a bad merge
+would break the organisation at once.
+
+### Why auto-merge runs go red
+
+Two distinct errors, and only one is the base branch race the retry loop was written for.
+
+| Error | Cause |
+| --- | --- |
+| `Base branch was modified` | another Dependabot PR merged while this one was merging |
+| `Pull request is in unstable status` | a check outside `match_pattern` was still running; `gh pr merge --auto` merges directly once the PR looks mergeable, and GitHub rejects that while any check is pending |
+
+The second is the more common one, and waiting for those checks is not the fix it looks
+like. In storage the straggler was the 509s benchmark, which does not fit the 600s
+`wait_for_checks` timeout with any margin; in recipes it was CodeQL `Analyze (go)`, not a
+benchmark at all. Both finished after the merge attempt, by 106s and 179s. Enumerating
+every check per repo would need maintaining forever, so the merge is retried ten times
+30s apart instead: 270s spans both cases, and the loop lives in one file.
+
+A red auto-merge run is not automatically a workflow bug. Contrib's eight failures were
+real test failures, where the wait job correctly refused to merge.
 
 ## Blacksmith runners
 
