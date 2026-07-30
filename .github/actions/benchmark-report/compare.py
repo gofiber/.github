@@ -29,6 +29,9 @@ FINGERPRINT_RE = re.compile(r"<!-- benchmark-fingerprint\r?\n(?P<body>.*?)-->", 
 # just means the next run counts as changed, which is the safe direction.
 FINGERPRINT_MAX = 200
 UNITS = ("ns/op", "MB/s", "B/op", "allocs/op")
+# A run where this many benchmarks moved is not having a noise problem, and
+# re-measuring them would cost a good part of the full suite again.
+RETEST_MAX = 100
 
 Key = namedtuple("Key", "pkg name unit")
 Change = namedtuple("Change", "key base current ratio")
@@ -185,9 +188,23 @@ def details(summary, body, expanded=False):
     return [tag, f"<summary>{summary}</summary>", "", *body, "", "</details>"]
 
 
+def key_text(key):
+    return f"{key.pkg}|{key.name}|{key.unit}"
+
+
+def text_key(text):
+    """Inverse of key_text; None for digest lines that are not a key at all."""
+    if text.count("|") < 2:
+        return None
+    pkg, rest = text.split("|", 1)
+    # the unit never contains a pipe, a subtest name theoretically could
+    name, unit = rest.rsplit("|", 1)
+    return Key(pkg, name, unit)
+
+
 def digest(changes):
     """Digest of the findings a report named, `pkg|benchmark|unit` to the factor."""
-    return {f"{c.key.pkg}|{c.key.name}|{c.key.unit}": rounded(c.ratio) for c in changes}
+    return {key_text(c.key): rounded(c.ratio) for c in changes}
 
 
 def factors(base, current):
@@ -289,6 +306,45 @@ def factor(text):
     return float(text[:-1]) / 100 if text.endswith("%") else float(text)
 
 
+def linked(sha, repo_url):
+    return f"[{sha[:7]}]({repo_url}/commit/{sha})" if repo_url else sha[:7]
+
+
+def pairs(keys):
+    return {(key.pkg, key.name) for key in keys}
+
+
+def write_plan(path, keys):
+    """Regex and package list for re-measuring only what moved, exact and cheap."""
+    named = sorted(pairs(keys))
+    with open(path, "w", encoding="utf-8") as handle:
+        if not named or len(named) > RETEST_MAX:
+            return
+        # -bench matches per slash-separated level, so target the top-level
+        # benchmark and take its subtests along
+        roots = sorted({re.escape(name.split("/", 1)[0]) for _, name in named})
+        handle.write("^(" + "|".join(roots) + ")$\n")
+        handle.writelines(pkg + "\n" for pkg in sorted({pkg for pkg, _ in named}))
+
+
+def save_verified(path, results):
+    """The believed values in `go test -bench` shape, so parse() reads them back.
+
+    Every name gets a sacrificial -1 suffix: parse() strips one trailing -N (the
+    GOMAXPROCS count on real output), and a bare name ending in -8 would lose it.
+    """
+    grouped = {}
+    for key, value in results.items():
+        grouped.setdefault(key.pkg, {}).setdefault(key.name, []).append((key.unit, value))
+    with open(path, "w", encoding="utf-8") as handle:
+        for pkg in sorted(grouped):
+            handle.write(f"pkg: {pkg}\n")
+            for name, units in sorted(grouped[pkg].items()):
+                units.sort(key=lambda pair: unit_rank(pair[0]))
+                columns = "\t".join(f"{value:.10g} {unit}" for unit, value in units)
+                handle.write(f"{name}-1\t1\t{columns}\n")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", required=True)
@@ -301,9 +357,20 @@ def main(argv=None):
     parser.add_argument("--min-ns", type=float, default=1.0)
     parser.add_argument("--limit", type=int, default=15)
     parser.add_argument("--hardware", default="")
-    parser.add_argument("--baseline", default="")
     parser.add_argument("--commit", default="")
+    parser.add_argument("--baseline-ref", default="")
+    parser.add_argument("--baseline-sha", default="")
+    parser.add_argument("--repo-url", default="")
     parser.add_argument("--run-url", default="")
+    # Where to write the retest instructions when anything would touch the comment,
+    # and where the re-measured numbers come back in. What does not reproduce on the
+    # second measurement is dropped; see the retest block in action.yml.
+    parser.add_argument("--retest-plan", default="")
+    parser.add_argument("--retested", default="")
+    # The believed values, written in `go test -bench` shape. The default branch
+    # stores them as the baseline, so a one-off spike in its own run does not
+    # become the number every following PR is judged against.
+    parser.add_argument("--save-verified", default="")
     # Report currently posted on the PR. Its fingerprint decides `changed`, which is
     # what keeps a commit that moved nothing from producing a second comment.
     parser.add_argument("--previous", default="")
@@ -318,9 +385,93 @@ def main(argv=None):
 
     worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns)
 
+    previous = ""
+    if args.previous and os.path.exists(args.previous):
+        with open(args.previous, encoding="utf-8") as handle:
+            previous = handle.read()
+    previous_digest = read_digest(previous)
+    reported = previous_digest or {}
+
+    # Everything a single measurement claims before it may touch the comment: fresh
+    # findings in either direction, and results the posted report names that have
+    # supposedly moved since (a "fixed" regression is just as often the runner).
+    flagged_worse = {c.key for c in worse}
+    flagged_better = {c.key for c in better}
+    stale = set()
+    for text, before in reported.items():
+        key = text_key(text)
+        if (
+            key is not None
+            and key in current
+            and key in base
+            and not near(before, rounded(ratio(key.unit, base[key], current[key])), args.tolerance)
+        ):
+            stale.add(key)
+    to_verify = flagged_worse | flagged_better | stale
+
+    retested = {}
+    if args.retested and os.path.exists(args.retested):
+        with open(args.retested, encoding="utf-8") as handle:
+            retested, _ = parse(handle)
+    retest_note = ""
+    if retested and to_verify:
+        reported_side = {}
+        for text, before in reported.items():
+            key = text_key(text)
+            if key is not None:
+                reported_side[key] = "w" if before > 1 else "b"
+
+        def side(key, value):
+            spot = ratio(key.unit, base[key], value)
+            return "w" if spot >= args.threshold else "b" if spot <= 1 / improve_threshold else "-"
+
+        def believe(key, value):
+            second = retested.get(key)
+            if second is None:
+                return value
+            # a flip with the posted report on the first measurement's side keeps
+            # the first: two of three readings agree, the retest was the outlier
+            if reported_side.get(key) == side(key, value) != side(key, second):
+                return value
+            return second
+
+        # only the verified results take their re-measured value; overriding the
+        # rest would let a fresh wobble flag something the first run cleared
+        current = {
+            key: believe(key, value) if key in to_verify else value
+            for key, value in current.items()
+        }
+        worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns)
+        # A finding survives when both measurements of this run agree on its
+        # direction, or when the posted report already said the same; a lone flip
+        # (slower once, faster once) is exactly the noise the retest exists to kill.
+        reported_worse = {text_key(text) for text, factor in reported.items() if factor > 1}
+        reported_better = {text_key(text) for text, factor in reported.items() if factor < 1}
+        worse = [c for c in worse if c.key in flagged_worse | reported_worse]
+        better = [c for c in better if c.key in flagged_better | reported_better]
+        counts = []
+        if flagged_worse:
+            survived = pairs({c.key for c in worse} & flagged_worse)
+            counts.append(f"{len(survived)}/{len(pairs(flagged_worse))} regressions")
+        if flagged_better:
+            survived = pairs({c.key for c in better} & flagged_better)
+            counts.append(f"{len(survived)}/{len(pairs(flagged_better))} improvements")
+        parts = [", ".join(counts) + " reproduced"] if counts else []
+        extra = stale - flagged_worse - flagged_better
+        if extra:
+            parts.append(f"{len(pairs(extra))} reported re-checked")
+        retest_note = "retest: " + ", ".join(parts)
+    if args.retest_plan:
+        write_plan(args.retest_plan, [] if retested else to_verify)
+    if args.save_verified and retested:
+        save_verified(args.save_verified, current)
+
     shared = len(current.keys() & base.keys())
-    measured = " vs ".join(filter(None, (args.commit[:7], args.baseline)))
-    notes = [measured] if measured else []
+    ends = [linked(args.commit, args.repo_url)] if args.commit else []
+    if args.baseline_ref:
+        sha = "@" + linked(args.baseline_sha, args.repo_url) if args.baseline_sha else ""
+        ends.append(args.baseline_ref + sha)
+    notes = [" vs ".join(ends)] if ends else []
     notes.append(f"{shared}/{len(current)} results compared")
     added = len(current.keys() - base.keys())
     removed = len(base.keys() - current.keys())
@@ -328,6 +479,8 @@ def main(argv=None):
         notes.append(f"{added} new, {removed} gone")
     if duplicates:
         notes.append(f"⚠️ {duplicates} measured twice")
+    if retest_note:
+        notes.append(retest_note)
     if args.hardware:
         notes.append(args.hardware)
     if args.run_url:
@@ -338,12 +491,8 @@ def main(argv=None):
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(report)
 
-    previous = ""
-    if args.previous and os.path.exists(args.previous):
-        with open(args.previous, encoding="utf-8") as handle:
-            previous = handle.read()
     changed = not nothing_new(
-        read_digest(previous), digest(worse + better), factors(base, current), args.tolerance
+        previous_digest, digest(worse + better), factors(base, current), args.tolerance
     )
 
     for key, value in (

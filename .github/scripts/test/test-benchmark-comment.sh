@@ -44,12 +44,12 @@ fi
 
 cat > "$SANDBOX/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-# records every call and answers the two reads the steps make
+# records every call and answers the three reads the steps make
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$*" in
   *"/comments --paginate"*) cat "$GH_ROWS" ;;
   *"issues/comments/"*"--jq .body"*) cat "$GH_BODY" ;;
-  *"--jq .html_url"*) echo "https://example.test/newest" ;;
+  *"issues/comments/"*"--jq .node_id"*) echo "IC_node42" ;;
 esac
 STUB
 chmod +x "$SANDBOX/bin/gh"
@@ -73,7 +73,6 @@ find_report() { # rows of "id<TAB>mine<TAB>any benchmark report", as the jq filt
 
 post() { # SIGNIFICANT CHANGED POSTED BURIED [PR]
   : > "$GH_LOG"
-  rm -f "$WORK/outdated.md"
   (
     cd "$WORK" || exit 1
     GH_TOKEN=x REPO=o/r PR="${5-7}" SHA=deadbeef MARKER="$MARKER" \
@@ -108,7 +107,7 @@ check "unchanged findings refresh even when buried" "PATCH repos/o/r/issues/comm
 check "changed findings refresh while the report is last" "PATCH repos/o/r/issues/comments/42;" \
   "$(post true true 42 false)"
 check "changed findings behind chatter get a fresh comment" \
-  "POST repos/o/r/issues/7/comments;PATCH repos/o/r/issues/comments/42;" "$(post true true 42 true)"
+  "POST repos/o/r/issues/7/comments;" "$(post true true 42 true)"
 check "a fixed regression is cleared in place" "PATCH repos/o/r/issues/comments/42;" \
   "$(post false true 42 true)"
 check "an already clean report stays untouched" "" "$(post false false 42 true)"
@@ -117,15 +116,19 @@ check "a push comments on the commit" "POST repos/o/r/commits/deadbeef/comments;
 
 echo "--- the superseded report"
 post true true 42 true > /dev/null
-check "is collapsed" "yes" \
-  "$(grep -qF '<details><summary>Outdated benchmark report' "$WORK/outdated.md" && echo yes || echo no)"
-check "links to its replacement" "yes" \
-  "$(grep -qF 'https://example.test/newest' "$WORK/outdated.md" && echo yes || echo no)"
-check "keeps what it said" "yes" \
-  "$(grep -qF 'the old numbers' "$WORK/outdated.md" && echo yes || echo no)"
-check "is still found by the marker" "yes" \
-  "$(head -1 "$WORK/outdated.md" | grep -qF "$MARKER" && echo yes || echo no)"
-check "carries the marker exactly once" "1" "$(grep -cF -- "$MARKER" "$WORK/outdated.md")"
+check "is hidden as outdated, not rewritten" "yes" \
+  "$(grep -q 'graphql.*minimizeComment.*classifier: OUTDATED' "$GH_LOG" && echo yes || echo no)"
+check "the hide targets the old comment's node" "yes" \
+  "$(grep -q 'graphql.*-f id=IC_node42' "$GH_LOG" && echo yes || echo no)"
+check "the node is looked up from the old comment" "yes" \
+  "$(grep -q 'repos/o/r/issues/comments/42 --jq .node_id' "$GH_LOG" && echo yes || echo no)"
+check "the replacement is posted before the old one is hidden" "yes" \
+  "$([ "$(grep -nF -- '-X POST' "$GH_LOG" | head -1 | cut -d: -f1)" \
+    -lt "$(grep -n 'graphql' "$GH_LOG" | head -1 | cut -d: -f1)" ] && echo yes || echo no)"
+check "no PATCH touches the old body" "no" \
+  "$(grep -qF -- '-X PATCH' "$GH_LOG" && echo yes || echo no)"
+check "refreshing in place hides nothing" "no" \
+  "$(post true false 42 true > /dev/null; grep -q graphql "$GH_LOG" && echo yes || echo no)"
 
 echo "--- the jq filter that feeds all of this"
 if command -v jq > /dev/null 2>&1; then

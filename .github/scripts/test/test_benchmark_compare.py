@@ -37,21 +37,30 @@ def bench(**benchmarks):
     return "\n".join(lines) + "\n"
 
 
-def run(base, current, previous=None, extra=()):
+def run(base, current, previous=None, retested=None, extra=()):
     """Run the script end to end: exit code, report and the key=value lines it printed."""
     with tempfile.TemporaryDirectory() as tmp:
-        paths = {name: f"{tmp}/{name}" for name in ("base", "current", "out", "previous")}
+        paths = {name: f"{tmp}/{name}" for name in ("base", "current", "out", "previous", "retested")}
         pathlib.Path(paths["base"]).write_text(base, encoding="utf-8")
         pathlib.Path(paths["current"]).write_text(current, encoding="utf-8")
         argv = ["--base", paths["base"], "--current", paths["current"], "--out", paths["out"]]
-        if previous is not None:
-            pathlib.Path(paths["previous"]).write_text(previous, encoding="utf-8")
-            argv += ["--previous", paths["previous"]]
+        for name, text in (("previous", previous), ("retested", retested)):
+            if text is not None:
+                pathlib.Path(paths[name]).write_text(text, encoding="utf-8")
+                argv += [f"--{name}", paths[name]]
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             code = compare.main(argv + list(extra))
         outputs = dict(line.split("=", 1) for line in printed.getvalue().splitlines())
         return code, pathlib.Path(paths["out"]).read_text(encoding="utf-8"), outputs
+
+
+def plan(base, current, previous=None):
+    """The retest plan a run writes: (regex, packages), or None when it stays empty."""
+    with tempfile.TemporaryDirectory() as tmp:
+        run(base, current, previous=previous, extra=["--retest-plan", f"{tmp}/plan"])
+        lines = pathlib.Path(f"{tmp}/plan").read_text(encoding="utf-8").splitlines()
+        return (lines[0], lines[1:]) if lines else None
 
 
 def test_parse_keys_on_package_name_and_unit():
@@ -278,6 +287,182 @@ def test_the_footer_links_to_the_full_run():
     base = bench(BenchmarkX="100 ns/op")
     _, report, _ = run(base, bench(BenchmarkX="300 ns/op"), extra=["--run-url", "https://x.test/runs/1"])
     assert "[full results](https://x.test/runs/1)" in report, report
+
+
+def test_the_footer_links_both_compared_commits():
+    base = bench(BenchmarkX="100 ns/op")
+    args = [
+        "--repo-url", "https://x.test/o/r",
+        "--commit", "ede8793aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "--baseline-ref", "main",
+        "--baseline-sha", "d8ae9aabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    ]
+    _, report, _ = run(base, bench(BenchmarkX="300 ns/op"), extra=args)
+    assert "[ede8793](https://x.test/o/r/commit/ede8793aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)" in report, report
+    assert "vs main@[d8ae9aa](https://x.test/o/r/commit/d8ae9aabbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)" in report, report
+    # without a resolved baseline sha the ref still names the branch, unlinked
+    _, report, _ = run(base, bench(BenchmarkX="300 ns/op"), extra=args[:6])
+    assert "vs main<" in report.replace(" ·", "<"), report
+
+
+def test_the_retest_plan_names_every_finding_in_both_directions():
+    base = "pkg: p\nBenchmarkSlow-4\t10\t100 ns/op\nBenchmarkFast-4\t10\t100 ns/op\nBenchmarkFine-4\t10\t100 ns/op\n"
+    base += "pkg: q\nBenchmarkSlow-4\t10\t100 ns/op\n"
+    current = "pkg: p\nBenchmarkSlow-4\t10\t300 ns/op\nBenchmarkFast-4\t10\t30 ns/op\nBenchmarkFine-4\t10\t100 ns/op\n"
+    current += "pkg: q\nBenchmarkSlow-4\t10\t300 ns/op\n"
+    # a false improvement pollutes the comment just like a false regression fails it
+    regex, pkgs = plan(base, current)
+    assert regex == "^(BenchmarkFast|BenchmarkSlow)$", regex
+    assert pkgs == ["p", "q"], pkgs
+    # nothing moved, no plan; -bench '' would have run the whole suite again
+    assert plan(base, base) is None
+
+
+def test_the_retest_plan_covers_deviations_from_the_posted_report():
+    base = bench(BenchmarkX="100 ns/op")
+    _, report, _ = run(base, bench(BenchmarkX="300 ns/op"))
+    # this run alone flags nothing, but it contradicts the posted 3.00x, and that
+    # contradiction is what would rewrite the comment; verify it first
+    assert plan(base, bench(BenchmarkX="120 ns/op"), previous=report) is not None
+    # a reported result sitting where the report says needs no second look; use a
+    # sub-threshold report (posted before the threshold was raised) so the current
+    # value is neither a fresh finding nor a deviation
+    _, mild, _ = run(base, bench(BenchmarkX="160 ns/op"), extra=["--threshold", "125%"])
+    assert plan(base, bench(BenchmarkX="140 ns/op"), previous=mild) is None
+
+
+def test_the_retest_plan_targets_the_parent_of_a_subtest():
+    base = bench(**{"Benchmark_Ctx_Get/header-8": "100 ns/op"})
+    current = bench(**{"Benchmark_Ctx_Get/header-8": "300 ns/op"})
+    regex, _ = plan(base, current)
+    # -bench matches per slash level, an alternation of full paths would match nothing
+    assert regex == "^(Benchmark_Ctx_Get)$", regex
+
+
+def test_a_mass_regression_is_not_worth_a_retest():
+    count = compare.RETEST_MAX + 1
+    base = bench(**{f"Benchmark{i}": "10 ns/op" for i in range(count)})
+    current = bench(**{f"Benchmark{i}": "100 ns/op" for i in range(count)})
+    assert plan(base, current) is None, "half the suite regressing is not a noise problem"
+
+
+def test_a_regression_that_does_not_reproduce_is_dropped():
+    base = bench(BenchmarkX="100 ns/op")
+    code, report, outputs = run(base, bench(BenchmarkX="300 ns/op"), retested=bench(BenchmarkX="110 ns/op"))
+    assert code == 0 and outputs["regressed"] == "false"
+    assert "No significant benchmark change" in report, report
+    assert "retest: 0/1 regressions reproduced" in report, report
+
+
+def test_a_regression_that_reproduces_stays():
+    base = bench(BenchmarkX="100 ns/op")
+    code, report, outputs = run(base, bench(BenchmarkX="300 ns/op"), retested=bench(BenchmarkX="290 ns/op"))
+    assert code == 1 and outputs["regressed"] == "true"
+    # the report carries the number that survived, not the first wobble
+    assert "100 → 290 ns/op" in report, report
+    assert "retest: 1/1 regressions reproduced" in report, report
+
+
+def test_the_retest_only_overrides_what_was_flagged():
+    base = bench(BenchmarkSlow="100 ns/op", BenchmarkFine="100 ns/op")
+    current = bench(BenchmarkSlow="300 ns/op", BenchmarkFine="100 ns/op")
+    # the parent-level regex re-measures more than was flagged, and BenchmarkFine
+    # happens to wobble high on that second run; it was never flagged, so it stays
+    retested = bench(BenchmarkSlow="310 ns/op", BenchmarkFine="900 ns/op")
+    code, report, outputs = run(base, current, retested=retested)
+    assert code == 1 and outputs["regressions"] == "1"
+    assert "BenchmarkFine" not in report, report
+
+
+def test_an_improvement_that_does_not_reproduce_is_dropped():
+    # PR 4570: SendFile showed 2.4x faster on a run that touched nothing near it
+    base = bench(BenchmarkX="100 ns/op")
+    code, report, outputs = run(base, bench(BenchmarkX="40 ns/op"), retested=bench(BenchmarkX="95 ns/op"))
+    assert code == 0 and outputs["significant"] == "false"
+    assert "No significant benchmark change" in report, report
+    assert "retest: 0/1 improvements reproduced" in report, report
+
+
+def test_a_lone_direction_flip_is_dropped_entirely():
+    base = bench(BenchmarkX="100 ns/op")
+    # slower once, faster once: the two runs disagree, so neither is believed
+    _, report, outputs = run(base, bench(BenchmarkX="300 ns/op"), retested=bench(BenchmarkX="40 ns/op"))
+    assert outputs["significant"] == "false", outputs
+    assert "No significant benchmark change" in report, report
+    # and the flip must not fail the gate either way round
+    code, report, outputs = run(base, bench(BenchmarkX="40 ns/op"), retested=bench(BenchmarkX="300 ns/op"))
+    assert code == 0 and outputs["regressed"] == "false", outputs
+    assert "No significant benchmark change" in report, report
+
+
+def test_units_of_one_benchmark_are_verified_independently():
+    base = bench(BenchmarkX="100 ns/op\t100 B/op")
+    # slower but leaner, and both directions reproduce
+    current = bench(BenchmarkX="300 ns/op\t40 B/op")
+    code, report, _ = run(base, current, retested=bench(BenchmarkX="290 ns/op\t42 B/op"))
+    assert code == 1
+    assert "100 → 290 ns/op" in report and "100 → 42 B/op" in report, report
+    assert "retest: 1/1 regressions, 1/1 improvements reproduced" in report, report
+
+
+def test_a_flip_backed_by_the_report_keeps_the_reported_side():
+    base = bench(BenchmarkX="100 ns/op")
+    _, first, _ = run(base, bench(BenchmarkX="300 ns/op"))
+    # run 1 confirms the posted 3.00x, the retest is the lone outlier; two of
+    # three readings agree, so the alert must not be cleared by the third
+    _, report, outputs = run(base, bench(BenchmarkX="290 ns/op"), previous=first,
+                             retested=bench(BenchmarkX="40 ns/op"))
+    assert outputs["regressed"] == "true" and outputs["changed"] == "false", outputs
+    assert "100 → 290 ns/op" in report, report
+    # same for a reported improvement that the retest suddenly calls a regression
+    _, first, _ = run(base, bench(BenchmarkX="40 ns/op"))
+    code, report, outputs = run(base, bench(BenchmarkX="42 ns/op"), previous=first,
+                                retested=bench(BenchmarkX="300 ns/op"))
+    assert code == 0 and outputs["changed"] == "false", outputs
+    assert "100 → 42 ns/op" in report, report
+
+
+def test_verified_values_can_seed_the_next_baseline():
+    base = bench(BenchmarkX="100 ns/op", BenchmarkY="100 ns/op")
+    current = bench(BenchmarkX="300 ns/op", BenchmarkY="100 ns/op")
+    with tempfile.TemporaryDirectory() as tmp:
+        run(base, current, retested=bench(BenchmarkX="110 ns/op"),
+            extra=["--save-verified", f"{tmp}/verified"])
+        with open(f"{tmp}/verified", encoding="utf-8") as handle:
+            saved, _ = compare.parse(handle)
+    # the spike was re-measured, its verified value goes in; the rest is untouched
+    assert saved[compare.Key("p", "BenchmarkX", "ns/op")] == 110.0
+    assert saved[compare.Key("p", "BenchmarkY", "ns/op")] == 100.0
+
+
+def test_saved_names_and_values_survive_the_round_trip():
+    text = "pkg: p\nBenchmark_Ctx_Get/header-8-4\t100\t0.50 ns/op\t1977.09 MB/s\n"
+    text += "pkg: q\nBenchmarkPlain-4\t100\t58 ns/op\t24 B/op\n"
+    results = compare.parse(io.StringIO(text))[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        compare.save_verified(f"{tmp}/v", results)
+        with open(f"{tmp}/v", encoding="utf-8") as handle:
+            again, duplicates = compare.parse(handle)
+    # the -8 must survive: parse strips one trailing -N, save adds a sacrificial one
+    assert again == results and duplicates == 0, again
+
+
+def test_a_reported_regression_that_wobbles_low_is_re_checked_not_cleared():
+    base = bench(BenchmarkX="100 ns/op")
+    _, first, _ = run(base, bench(BenchmarkX="300 ns/op"))
+    # run 1 says "fixed", the re-measurement says the regression is still there
+    _, report, outputs = run(base, bench(BenchmarkX="120 ns/op"), previous=first,
+                             retested=bench(BenchmarkX="290 ns/op"))
+    assert outputs["regressed"] == "true", outputs
+    # near the posted 3.00x, so the comment is refreshed, not replaced
+    assert outputs["changed"] == "false", outputs
+    assert "100 → 290 ns/op" in report, report
+    assert "retest: 1 reported re-checked" in report, report
+    # and when the fix is real, the retest confirms it and the comment may clear
+    _, report, outputs = run(base, bench(BenchmarkX="120 ns/op"), previous=first,
+                             retested=bench(BenchmarkX="105 ns/op"))
+    assert outputs["regressed"] == "false" and outputs["changed"] == "true", outputs
+    assert "No significant benchmark change" in report, report
 
 
 def test_an_unreadable_fingerprint_counts_as_changed():

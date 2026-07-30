@@ -325,6 +325,17 @@ jobs:
       - name: Fetch Repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # When the comparison flags regressions, benchmark-report re-measures exactly
+      # those benchmarks to weed out one-off runner noise, and that needs a toolchain
+      # this job otherwise would not have.
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ inputs.go-version }}
+          check-latest: true
+          # sharding is single-module only, so the module sits in working-directory
+          cache-dependency-path: ${{ format('{0}/go.sum', inputs.working-directory) }}
+
       - name: Build artifact prefix
         id: prefix
         shell: bash

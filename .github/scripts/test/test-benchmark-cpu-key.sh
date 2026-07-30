@@ -132,6 +132,10 @@ check "workflow exports BENCHMARK_CPU" "yes" \
   "$(grep -qF 'BENCHMARK_CPU=${model} (GOMAXPROCS=${procs})' "$WORKFLOW" && echo yes || echo no)"
 check "workflow keeps the arm fallback" "yes" \
   "$(grep -qF '/^CPU implementer|^CPU part/' "$WORKFLOW" && echo yes || echo no)"
+# the retest in the action re-derives the local CPU the same way; without the
+# fallback it would refuse to ever re-measure on arm
+check "action retest keeps the arm fallback" "yes" \
+  "$(grep -qF '/^CPU implementer|^CPU part/' "$REPORT_ACTION" && echo yes || echo no)"
 check "shard records BENCHMARK_CPU" "yes" \
   "$(grep -qF 'printf '"'"'%s\n'"'"' "$BENCHMARK_CPU" > cpu.txt' "$WORKFLOW" && echo yes || echo no)"
 check "single-job path forwards it" "yes" \

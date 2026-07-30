@@ -24,9 +24,10 @@ action is allowed to be loud exactly once per finding.
   1. the findings actually changed (see below), and
   2. the posted report has been buried under someone else's comment, so refreshing
      it would go unseen.
-- **Superseded reports are collapsed.** When a new comment is posted, the one it
-  replaces is rewritten into a collapsed `<details>` block marked outdated and
-  linking to its replacement. At most one report per module is ever expanded.
+- **Superseded reports are hidden.** When a new comment is posted, the one it
+  replaces is minimized as outdated (the GraphQL `minimizeComment` mutation with
+  classifier `OUTDATED`): GitHub folds it away and labels it, its body and marker
+  stay intact. At most one report per module is ever visible.
 - **A fixed regression is cleared in place.** Once the numbers moved far enough to
   count as fixed (see below) the posted report is patched down to a one-line all
   clear. It is never deleted, so a flapping benchmark cannot notify the PR twice by
@@ -65,13 +66,53 @@ Reports with more than 200 findings carry no fingerprint, they are treated as
 changed every time. At that point the report is not about individual benchmarks
 anymore.
 
+### Every deviation has to reproduce
+
+The pools are noisy enough that a single measurement is as likely wobble as change
+(an untouched benchmark has been seen to move close to 2x between runs). So every
+result whose single measurement would touch the comment is re-measured in the same
+job with an exact `-bench` regex, seconds instead of the quarter hour of the full
+suite, and only what reproduces is believed. That covers
+
+- fresh regressions: they fail the gate, so a false one is a red PR for nothing,
+- fresh improvements: they do not fail anything, but a false ⚡ posts a comment and
+  praises a commit for a runner's good mood,
+- results the posted report names whose numbers have supposedly moved since: a
+  "fixed" regression is just as often the runner as a real fix, so it is re-checked
+  before the comment is cleared or rewritten.
+
+The rules of the re-measurement:
+
+- Only the verified benchmarks take their re-measured value. The regex targets the
+  top-level benchmark (subtests ride along, `-bench` matches per slash level), but
+  anything the second run measured beyond that is ignored, otherwise a fresh wobble
+  could flag something the first run cleared.
+- A lone direction flip dies: a finding that shows slower on one measurement and
+  faster on the other is reported as neither. When the posted report already
+  agreed with one of the two directions, that side wins - two of three readings
+  beat the outlier.
+- A default-branch run stores the verified values as the baseline (`verified.txt`
+  over the raw output). Without that, a one-off spike in main's own run would
+  become the number every following PR is judged against, and the PR-side retest
+  cannot catch a corrupted base: both PR measurements would honestly reproduce
+  the phantom difference.
+- The footer says what happened: `retest: 1/2 regressions, 1/1 improvements
+  reproduced, 1 reported re-checked`.
+- The retest is skipped, and the first measurement stands, when more than 100
+  benchmarks moved (that is not a noise problem), on multi-module runs, when the
+  runner's CPU differs from the one the numbers came from, or without a Go
+  toolchain. The sharded path installs Go in the report job for exactly this.
+
 ## Report format
 
 ```
 ❗❗❗ 2 benchmarks slower (up to 6.20x)    <- expanded, the half that needs acting on
 ⚡ 9 benchmarks faster (up to 2.30x)       <- collapsed
-a1b2c3d vs main@6955385 · 1608/1620 results compared · Neoverse-N1 (GOMAXPROCS=6)
+a1b2c3d vs main@6955385 · 1608/1620 results compared · retest: 2/2 regressions
+reproduced · Ampere-1a (GOMAXPROCS=4) · full results
 ```
+
+Both commit shas link to their commits, `full results` links to the workflow run.
 
 - `⚡` faster, `❗` slower. One symbol at the threshold, one more per doubling past
   it, three at most, so a 6x regression is visible without reading the numbers. The

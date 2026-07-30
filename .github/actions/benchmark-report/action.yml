@@ -206,6 +206,7 @@ runs:
         IMPROVE_THRESHOLD: ${{ inputs.improve-threshold }}
         ALERT_MIN_NS: ${{ inputs.alert-min-ns }}
         OUTPUT_FILE: ${{ inputs.output-file }}
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
         CPU_MODEL: ${{ steps.cpu.outputs.model }}
         COMPARABLE: ${{ steps.cpu.outputs.comparable }}
         ACTION_PATH: ${{ github.action_path }}
@@ -213,6 +214,7 @@ runs:
         MATCHED_KEY: ${{ steps.cache.outputs.cache-matched-key }}
         # the head of the PR, not the merge commit nobody can look up
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
+        REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
@@ -225,35 +227,88 @@ runs:
         fi
         # restore-keys can hand back an older cache than the current default branch head,
         # and a stale baseline is the usual reason a number looks off
-        BASELINE="${DEFAULT_BRANCH}"
-        SHA="${MATCHED_KEY##*-}"
-        if [[ "${#SHA}" -eq 40 ]]; then
-          BASELINE="${DEFAULT_BRANCH}@${SHA:0:7}"
+        BASE_SHA="${MATCHED_KEY##*-}"
+        if [[ "${#BASE_SHA}" -ne 40 ]]; then
+          BASE_SHA=""
         fi
+        compare() {
+          python3 "${ACTION_PATH}/compare.py" \
+            --base ./cache/baseline.txt \
+            --current "$OUTPUT_FILE" \
+            --out report.md \
+            --previous previous.md \
+            --threshold "$ALERT_THRESHOLD" \
+            --improve-threshold "$IMPROVE_THRESHOLD" \
+            --min-ns "$ALERT_MIN_NS" \
+            --commit "$COMMIT" \
+            --baseline-ref "$DEFAULT_BRANCH" \
+            --baseline-sha "$BASE_SHA" \
+            --repo-url "$REPO_URL" \
+            --run-url "$RUN_URL" \
+            "$@"
+        }
         status=0
-        output="$(python3 "${ACTION_PATH}/compare.py" \
-          --base ./cache/baseline.txt \
-          --current "$OUTPUT_FILE" \
-          --out report.md \
-          --previous previous.md \
-          --threshold "$ALERT_THRESHOLD" \
-          --improve-threshold "$IMPROVE_THRESHOLD" \
-          --min-ns "$ALERT_MIN_NS" \
-          --commit "$COMMIT" \
-          --baseline "$BASELINE" \
-          --hardware "$CPU_MODEL" \
-          --run-url "$RUN_URL")" || status=$?
+        output="$(compare --retest-plan retest-plan.txt)" || status=$?
         printf '%s\n' "$output"
         # exit 1 means regressions, anything else means the script itself broke
         if [[ "$status" -gt 1 ]]; then
           exit "$status"
+        fi
+        # The pools are noisy enough that a single measurement crossing a threshold,
+        # in either direction, or drifting from what the posted report says is as
+        # likely wobble as change. Re-measure exactly those benchmarks (seconds, not
+        # the quarter hour of the full suite) and believe only what reproduces. The
+        # plan file is empty when there is nothing, or too much, to ask.
+        if [[ -s retest-plan.txt ]]; then
+          skip=""
+          if ! command -v go > /dev/null; then
+            skip="no Go toolchain on this runner"
+          elif [[ ! -f "${WORKING_DIRECTORY}/go.mod" ]]; then
+            skip="no go.mod in '${WORKING_DIRECTORY}' (multi-module runs are not re-measured)"
+          else
+            # same derivation as the workflow's Describe step; on another machine the
+            # re-measurement would prove nothing
+            model="$(lscpu | awk -F': *' '/^Model name/ && !m { m = $2 } END { print m }')"
+            if [[ -z "$model" ]]; then
+              model="$(uname -m) $(awk -F': *' '/^CPU implementer|^CPU part/ { print $2 }' \
+                /proc/cpuinfo | sort -u | tr '\n' ' ')"
+            fi
+            model="$(printf '%s' "$model" | sed 's/ *$//')"
+            if [[ "${CPU_MODEL%% (GOMAXPROCS=*}" != "$model" ]]; then
+              skip="this runner is a '${model}', the numbers came from '${CPU_MODEL}'"
+            fi
+          fi
+          if [[ -n "$skip" ]]; then
+            echo "::warning::regressions not re-measured: ${skip}"
+          else
+            procs="$(nproc)"
+            if [[ "$CPU_MODEL" =~ \(GOMAXPROCS=([0-9]+)\) ]]; then
+              procs="${BASH_REMATCH[1]}"
+            fi
+            regex="$(head -n 1 retest-plan.txt)"
+            mapfile -t pkgs < <(tail -n +2 retest-plan.txt)
+            echo "Re-measuring the flagged benchmarks in ${#pkgs[@]} package(s)"
+            if (cd "$WORKING_DIRECTORY" && GOMAXPROCS="$procs" \
+                go test -run '^$' -bench "$regex" -benchmem -timeout 15m "${pkgs[@]}") \
+                > "$GITHUB_WORKSPACE/retest.txt" 2> "$GITHUB_WORKSPACE/retest.log"; then
+              status=0
+              output="$(compare --retested retest.txt --save-verified verified.txt)" || status=$?
+              printf '%s\n' "$output"
+              if [[ "$status" -gt 1 ]]; then
+                exit "$status"
+              fi
+            else
+              echo "::warning::re-measuring failed, keeping the first measurement"
+              cat retest.log
+            fi
+          fi
         fi
         cat report.md >> "$GITHUB_STEP_SUMMARY"
         printf '%s\ncompared=true\n' "$output" >> "$GITHUB_OUTPUT"
 
     # Comment rules in full: see README.md next to this file. Short version: refresh
     # in place while the findings hold, comment again only once they really changed
-    # and the old report has been buried, and collapse whatever gets superseded.
+    # and the old report has been buried, and hide whatever gets superseded.
     - name: Post Benchmark Report
       continue-on-error: true
       if: >-
@@ -296,14 +351,13 @@ runs:
           gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@comment.md > /dev/null
           exit 0
         fi
-        url="$(gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md --jq .html_url)"
-        {
-          printf '%s\n\n<details><summary>Outdated benchmark report, superseded by <a href="%s">a newer run</a>.</summary>\n\n' \
-            "$MARKER" "$url"
-          grep -vF -- "$MARKER" previous.md || true
-          printf '\n</details>\n'
-        } > outdated.md
-        gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@outdated.md > /dev/null
+        gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
+        # the superseded report is hidden, not rewritten: its body (and marker) stay
+        # intact, GitHub folds it away and labels it outdated
+        node="$(gh api "repos/${REPO}/issues/comments/${POSTED}" --jq .node_id)"
+        gh api graphql \
+          -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
+          -f id="$node" > /dev/null
 
     - name: Fail On Regression
       if: steps.compare.outputs.regressed == 'true' && github.event_name == 'pull_request'
@@ -320,7 +374,13 @@ runs:
       run: |
         set -euo pipefail
         mkdir -p ./cache
-        cp "$OUTPUT_FILE" ./cache/baseline.txt
+        # prefer the verified values when this run re-measured its own deviations,
+        # so a one-off spike does not become the baseline every PR is judged against
+        if [[ -f verified.txt ]]; then
+          cp verified.txt ./cache/baseline.txt
+        else
+          cp "$OUTPUT_FILE" ./cache/baseline.txt
+        fi
 
     - name: Publish Benchmark Results to GitHub Pages
       if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch && steps.cpu.outputs.publish == 'true'
