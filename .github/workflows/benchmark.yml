@@ -150,34 +150,32 @@ jobs:
           repository: gofiber/.github
           path: .central
 
-      # The last default-branch run's cache: timings.txt carries measured wall
-      # seconds per top-level benchmark, baseline.txt back-fills anything not yet
-      # measured from its `ok <pkg> <secs>` lines. ns/op alone would miss setup
-      # outside the timer (proxy burns a minute on servers it starts untimed).
-      - name: Restore the last benchmark baseline
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ./cache
-          key: benchmark-plan-weights-lookup
-          restore-keys: benchmark-v2-${{ runner.os }}-
+      # The last published run's measured wall seconds per top-level benchmark,
+      # fetched from gh-pages where the report publishes them: unlike a cache
+      # entry they cannot be evicted under repo-wide cache pressure. A repo that
+      # never published any simply gets count-balanced shards. ns/op alone would
+      # miss setup outside the timer (proxy burns a minute on servers it starts
+      # untimed), which is why these are recorded wall times.
+      - name: Fetch the last measured shard timings
+        shell: bash
+        env:
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          DATA_DIR: ${{ inputs.benchmark-data-dir-path }}
+        run: |
+          set -euo pipefail
+          curl -fsSL --max-time 15 "${REPO_URL}/raw/gh-pages/${DATA_DIR}/shard-timings.txt" \
+            -o timings.txt 2> /dev/null || : > timings.txt
 
       # Weighed ONCE here and handed to every leg, so all legs split on identical
-      # weights; legs computing them from data fetched separately could straddle
-      # a publish and silently drop or double benchmarks.
-      - name: Weigh benchmarks from the last baseline
+      # weights; legs fetching them separately could straddle a publish and
+      # silently drop or double benchmarks.
+      - name: Weigh benchmarks from the last run
         id: weigh
         shell: bash
         run: |
           set -euo pipefail
-          # best effort: no baseline yet just means count-balanced shards
-          weights="{}"
-          if [[ -f ./cache/baseline.txt ]]; then
-            weights="$(python3 .central/.github/scripts/shard_benchmarks.py weights ./cache/timings.txt < ./cache/baseline.txt || echo '{}')"
-          fi
-          measured=0
-          if [[ -f ./cache/timings.txt ]]; then
-            measured="$(wc -l < ./cache/timings.txt)"
-          fi
+          weights="$(python3 .central/.github/scripts/shard_benchmarks.py weights ./timings.txt < /dev/null || echo '{}')"
+          measured="$(grep -c . ./timings.txt || true)"
           echo "weights=${weights}" >> "$GITHUB_OUTPUT"
           echo "Shard weights for $(python3 -c 'import json,sys; print(len(json.loads(sys.argv[1])))' "$weights") benchmarks, ${measured} with measured wall time" \
             >> "$GITHUB_STEP_SUMMARY"

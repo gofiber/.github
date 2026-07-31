@@ -16,12 +16,13 @@ With WEIGHTS set (JSON from `shard_benchmarks.py weights`, fed the last merged
 baseline output by the plan job), the split balances measured seconds instead of
 counting functions; without it, the old round-robin stands.
 
-The baseline alone still guesses: it smears a package's wall time evenly over
-its variants, and one function hiding a minute of untimed setup (proxy's
+A baseline alone would still guess: it smears a package's wall time evenly
+over its variants, and one function hiding a minute of untimed setup (proxy's
 StripHopByHop) looks as cheap as its neighbours. So each shard pipes its
 `go test` output through `record`, which stamps every finished result line and
-writes real seconds per top-level function; merged and cached next to the
-baseline, those measurements replace the guess on the next run.
+writes real seconds per top-level function; merged and published to gh-pages
+as shard-timings.txt (an evictable cache lost them within hours), they are
+what the plan job hands back in on the next run.
 """
 import json
 import math

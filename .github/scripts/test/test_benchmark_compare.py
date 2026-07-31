@@ -149,6 +149,119 @@ def test_quantization_flips_of_rounded_units_are_ignored():
         assert not worse and not better, (base, current, worse, better)
 
 
+HISTORY_DATA = {
+    "version": 2,
+    "repoUrl": "",
+    "runs": [
+        {"id": "a" * 40, "cpu": "Ampere (GOMAXPROCS=4)"},
+        {"id": "b" * 40, "cpu": "Intel Xeon (GOMAXPROCS=2)"},
+        {"id": "c" * 40, "cpu": "Ampere (GOMAXPROCS=4)"},
+    ],
+    "names": [
+        "Benchmark_A (github.com/x/root) - ns/op",
+        "Benchmark_A (github.com/x/root) - B/op",
+        "Benchmark_Bare - ns/op",
+        "Benchmark_Gone (github.com/x/root) - ns/op",
+    ],
+    "units": ["ns/op", "B/op", "ns/op", "ns/op"],
+    "values": [
+        [100.0, 220.0, 110.0],
+        [24.0, 24.0, 24.0],
+        [50.0, 90.0, 55.0],
+        [70.0, 70.0, None],
+    ],
+}
+
+
+def history_file(tmp):
+    path = f"{tmp}/data.js"
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("window.BENCHMARK_DATA = " + json.dumps(HISTORY_DATA) + "\n")
+    return path
+
+
+def test_history_baseline_is_the_newest_run_of_the_same_cpu():
+    # the published data IS the baseline: newest column of this hardware,
+    # other CPU models in between are someone else's baseline
+    with tempfile.TemporaryDirectory() as tmp:
+        path = history_file(tmp)
+        base, sha = compare.history_baseline(path, "Ampere (GOMAXPROCS=4)")
+        assert sha == "c" * 40
+        assert base[compare.Key("github.com/x/root", "Benchmark_A", "ns/op")] == 110.0
+        assert base[compare.Key("", "Benchmark_Bare", "ns/op")] == 55.0
+        # no value in the picked run means no baseline, not an older value
+        assert compare.Key("github.com/x/root", "Benchmark_Gone", "ns/op") not in base
+        base, sha = compare.history_baseline(path, "Intel Xeon (GOMAXPROCS=2)")
+        assert sha == "b" * 40
+        assert base[compare.Key("github.com/x/root", "Benchmark_A", "ns/op")] == 220.0
+
+
+def test_history_baseline_without_a_matching_cpu_is_empty():
+    with tempfile.TemporaryDirectory() as tmp:
+        path = history_file(tmp)
+        assert compare.history_baseline(path, "AMD EPYC") == ({}, "")
+        assert compare.history_baseline(path, "") == ({}, "")
+    assert compare.history_baseline("/nonexistent/data.js", "Ampere") == ({}, "")
+
+
+def test_align_packages_claims_unambiguous_bare_names():
+    # storage publishes without the package suffix; the run's own results know
+    # the package, so an unambiguous bare series is re-keyed onto it
+    current = {
+        compare.Key("github.com/x/redis", "Benchmark_Set", "ns/op"): 1.0,
+        compare.Key("github.com/x/redis", "Benchmark_Get", "ns/op"): 1.0,
+        compare.Key("github.com/x/other", "Benchmark_Get", "ns/op"): 1.0,
+    }
+    mapping = {
+        compare.Key("", "Benchmark_Set", "ns/op"): 5.0,
+        compare.Key("", "Benchmark_Get", "ns/op"): 7.0,
+        compare.Key("github.com/x/redis", "Benchmark_Keep", "ns/op"): 9.0,
+    }
+    aligned = compare.align_packages(mapping, current)
+    assert aligned[compare.Key("github.com/x/redis", "Benchmark_Set", "ns/op")] == 5.0
+    # a name two packages share stays bare instead of guessing an owner
+    assert aligned[compare.Key("", "Benchmark_Get", "ns/op")] == 7.0
+    assert aligned[compare.Key("github.com/x/redis", "Benchmark_Keep", "ns/op")] == 9.0
+
+
+def test_main_without_any_baseline_prints_the_marker():
+    # no --base and no same-CPU run in the history: the action reads the marker
+    # and reports "comparison skipped" instead of comparing against nothing
+    with tempfile.TemporaryDirectory() as tmp:
+        current = f"{tmp}/current.txt"
+        with open(current, "w", encoding="utf-8") as handle:
+            handle.write("pkg: github.com/x/root\nBenchmark_A-4\t10\t100 ns/op\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = compare.main([
+                "--current", current, "--out", f"{tmp}/report.md",
+                "--baseline-cpu", "AMD EPYC", "--history", history_file(tmp),
+            ])
+        assert code == 0
+        assert "baseline=none" in out.getvalue(), out.getvalue()
+
+
+def test_main_compares_against_the_history_baseline():
+    with tempfile.TemporaryDirectory() as tmp:
+        current = f"{tmp}/current.txt"
+        with open(current, "w", encoding="utf-8") as handle:
+            handle.write("pkg: github.com/x/root\nBenchmark_A-4\t10\t400 ns/op\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = compare.main([
+                "--current", current, "--out", f"{tmp}/report.md",
+                "--baseline-cpu", "Ampere (GOMAXPROCS=4)", "--history", history_file(tmp),
+                "--baseline-ref", "main",
+            ])
+        # 110 -> 400 ns/op is a regression against the newest Ampere column
+        assert code == 1, out.getvalue()
+        assert "regressions=1" in out.getvalue(), out.getvalue()
+        with open(f"{tmp}/report.md", encoding="utf-8") as handle:
+            report = handle.read()
+        # the baseline commit is linked from the history run, not a cache key
+        assert ("c" * 40)[:7] in report, report
+
+
 def test_real_memory_changes_stay_reported():
     # a genuinely new allocation per op is signal, even when the ratio is infinite:
     # Go's smallest allocation moves B/op by 8, and past the 0/1 zone every alloc

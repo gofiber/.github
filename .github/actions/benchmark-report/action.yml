@@ -1,8 +1,9 @@
 name: benchmark-report
 description: >-
-  Turns a raw `go test -bench` output file into the alert comparison, the stored
-  baseline and the gh-pages publish. Split out of the benchmark workflow so the
-  single-job run and the merged sharded run go through identical logic.
+  Turns a raw `go test -bench` output file into the alert comparison and the
+  gh-pages publish, whose newest data point doubles as the next run's baseline.
+  Split out of the benchmark workflow so the single-job run and the merged
+  sharded run go through identical logic.
 
 inputs:
   output-file:
@@ -12,8 +13,8 @@ inputs:
   timings-file:
     description: >-
       Measured wall seconds per top-level benchmark, recorded by the sharded run.
-      Stored next to the baseline so the next run's plan job balances the shards
-      on real seconds. Empty skips it.
+      Published to gh-pages next to the data so the next run's plan job balances
+      the shards on real seconds. Empty skips it.
     required: false
     default: ''
   cpu-model:
@@ -123,6 +124,9 @@ runs:
         fi
         echo "comparable=${COMPARABLE}" >> "$GITHUB_OUTPUT"
 
+    # Gates the publish below: only the run that measured the current default
+    # branch head may append the newest data point, because that point doubles
+    # as the next baseline (see history_baseline in compare.py).
     - name: Get Default branch SHA
       id: base-sha
       shell: bash
@@ -136,37 +140,6 @@ runs:
           exit 1
         fi
         echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-
-    - name: Build Cache Key
-      id: cache-key
-      shell: bash
-      env:
-        CPU_MODEL: ${{ steps.cpu.outputs.model }}
-        BASE_SHA: ${{ steps.base-sha.outputs.sha }}
-        WORKING_DIRECTORY: ${{ inputs.working-directory }}
-      run: |
-        set -euo pipefail
-        SAFE_CPU_MODEL="$(printf '%s' "$CPU_MODEL" | tr -cs '[:alnum:]._-' '-')"
-        SAFE_CPU_MODEL="${SAFE_CPU_MODEL#-}"
-        SAFE_CPU_MODEL="${SAFE_CPU_MODEL%-}"
-        WD_SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
-        # Restores walk restore-keys to the newest cache of the same OS/CPU/module.
-        # The run id plus attempt keeps the save key unique: a cache key can never
-        # be overwritten, and without both a dispatch or a re-run attempt on an
-        # unchanged default branch could not store its fresh baseline (the run id
-        # alone stays the same across re-run attempts). Old entries age out via
-        # cache eviction.
-        # v2 caches hold the raw benchmark output, v1 held a github-action-benchmark JSON.
-        echo "prefix=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
-        echo "key=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-
-    - name: Get Benchmark Results from Default branch
-      id: cache
-      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ./cache
-        key: ${{ steps.cache-key.outputs.key }}
-        restore-keys: ${{ steps.cache-key.outputs.prefix }}
 
     # What the PR already says decides whether this run has anything to add, so the
     # posted report is fetched before the comparison runs.
@@ -223,7 +196,6 @@ runs:
         COMPARABLE: ${{ steps.cpu.outputs.comparable }}
         ACTION_PATH: ${{ github.action_path }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        MATCHED_KEY: ${{ steps.cache.outputs.cache-matched-key }}
         # the head of the PR, not the merge commit nobody can look up
         COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
         REPO_URL: ${{ github.server_url }}/${{ github.repository }}
@@ -231,31 +203,21 @@ runs:
       run: |
         set -euo pipefail
         # a tracked or setup-script-left file must not pose as this run's retest
-        # output: the publish and store steps treat its presence as "a retest ran"
+        # output: the publish step treats its presence as "a retest ran"
         rm -f verified.txt
         if [[ "${COMPARABLE}" != "true" ]]; then
           exit 0
         fi
-        if [[ ! -f ./cache/baseline.txt ]]; then
-          echo "No cached baseline for CPU '${CPU_MODEL}', comparison skipped." >> "$GITHUB_STEP_SUMMARY"
-          exit 0
-        fi
-        # restore-keys can hand back an older cache than the current default branch
-        # head, and a stale baseline is the usual reason a number looks off. The key
-        # ends in <sha>-<run id>-<attempt>; older caches carry fewer numeric suffixes.
-        if [[ "$MATCHED_KEY" =~ -([0-9a-f]{40})(-[0-9]+)*$ ]]; then
-          BASE_SHA="${BASH_REMATCH[1]}"
-        else
-          BASE_SHA=""
-        fi
-        # The published history carries every benchmark's own noise band; a
-        # same-machine retest cannot see cross-machine wobble, this can.
+        # The published history is both sides of the comparison: its newest
+        # same-CPU run is the baseline (the verified numbers are what gets
+        # published), and its full series carry every benchmark's own noise
+        # band, the cross-machine wobble a same-machine retest cannot see.
         if ! curl -fsSL --max-time 10 "${REPO_URL}/raw/gh-pages/${DATA_DIR}/data.js" -o history.js 2> /dev/null; then
           : > history.js
         fi
         compare() {
           python3 "${ACTION_PATH}/compare.py" \
-            --base ./cache/baseline.txt \
+            --baseline-cpu "$CPU_MODEL" \
             --current "$OUTPUT_FILE" \
             --out report.md \
             --previous previous.md \
@@ -264,7 +226,6 @@ runs:
             --min-ns "$ALERT_MIN_NS" \
             --commit "$COMMIT" \
             --baseline-ref "$DEFAULT_BRANCH" \
-            --baseline-sha "$BASE_SHA" \
             --repo-url "$REPO_URL" \
             --run-url "$RUN_URL" \
             --workdir "$WORKING_DIRECTORY" \
@@ -275,6 +236,10 @@ runs:
         status=0
         output="$(compare --retest-plan retest-plan.txt)" || status=$?
         printf '%s\n' "$output"
+        if printf '%s\n' "$output" | grep -qx 'baseline=none'; then
+          echo "No published baseline for CPU '${CPU_MODEL}', comparison skipped." >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
         # exit 1 means regressions, anything else means the script itself broke
         if [[ "$status" -gt 1 ]]; then
           exit "$status"
@@ -417,47 +382,12 @@ runs:
         echo "::error::benchmark regressions detected, see the job summary for the table"
         exit 1
 
-    - name: Store Benchmark Results for Default branch
-      # the sha gate keeps a re-run of an outdated commit (or the losing side of a
-      # push race) from storing its stale numbers as the newest baseline, which the
-      # per-run save key would otherwise happily accept
-      if: >-
-        github.event_name != 'pull_request'
-        && github.ref_name == github.event.repository.default_branch
-        && steps.cpu.outputs.comparable == 'true'
-        && steps.base-sha.outputs.sha == github.sha
-      shell: bash
-      env:
-        OUTPUT_FILE: ${{ inputs.output-file }}
-        TIMINGS_FILE: ${{ inputs.timings-file }}
-      run: |
-        set -euo pipefail
-        mkdir -p ./cache
-        # prefer the verified values when this run re-measured its own deviations,
-        # so a one-off spike does not become the baseline every PR is judged against
-        if [[ -f verified.txt ]]; then
-          cp verified.txt ./cache/baseline.txt
-        else
-          cp "$OUTPUT_FILE" ./cache/baseline.txt
-        fi
-        if [[ -n "$TIMINGS_FILE" && -s "$TIMINGS_FILE" ]]; then
-          cp "$TIMINGS_FILE" ./cache/timings.txt
-        fi
-
-    - name: Update Benchmark Results cache
-      if: >-
-        github.event_name != 'pull_request'
-        && github.ref_name == github.event.repository.default_branch
-        && steps.cpu.outputs.comparable == 'true'
-        && steps.base-sha.outputs.sha == github.sha
-      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-      with:
-        path: ./cache
-        key: ${{ steps.cache-key.outputs.key }}
-
     # Data publish and page sync in one commit. The data lands in the columnar
     # v2 data.js; github-action-benchmark is gone (its per-run format had grown
-    # fiber's data.js to 85 MB, a third of GitHub's hard file limit).
+    # fiber's data.js to 85 MB, a third of GitHub's hard file limit). The newest
+    # data point doubles as the next run's baseline (history_baseline in
+    # compare.py), which is why nothing is cached anymore: actions/cache evicts
+    # under repo-wide pressure, gh-pages does not forget.
     - name: Publish Benchmark Results to GitHub Pages
       if: >-
         github.event_name != 'pull_request'
@@ -466,12 +396,18 @@ runs:
       uses: gofiber/.github/.github/actions/benchmark-pages@main
       with:
         data-dir: ${{ inputs.benchmark-data-dir-path }}
-        # empty when this runner's CPU is not the pinned one: page sync only.
-        # After a retest the verified numbers are published instead of the raw
-        # ones: a value the retest disproved reaches neither the charts nor the
-        # overview nor the noise-band training data. Below the bars the raw
-        # wobble still publishes, which is what the noise band learns from.
-        output-file: ${{ steps.cpu.outputs.publish == 'true' && (hashFiles('verified.txt') != '' && 'verified.txt' || inputs.output-file) || '' }}
+        # empty when this runner's CPU is not the pinned one (page sync only) or
+        # when this run did not measure the current default branch head: a re-run
+        # of an outdated commit must not become the newest point, it would turn
+        # the baseline back. After a retest the verified numbers are published
+        # instead of the raw ones: a value the retest disproved reaches neither
+        # the charts nor the overview, the noise band nor the next baseline.
+        # Below the bars the raw wobble still publishes, which is what the noise
+        # band learns from.
+        output-file: ${{ (steps.cpu.outputs.publish == 'true' && steps.base-sha.outputs.sha == github.sha) && (hashFiles('verified.txt') != '' && 'verified.txt' || inputs.output-file) || '' }}
+        # the shard planner's measured wall seconds, published next to the data;
+        # CPU-agnostic (only the ratios matter), so it is not tied to the pin
+        timings-file: ${{ steps.base-sha.outputs.sha == github.sha && inputs.timings-file || '' }}
         max-items: ${{ inputs.max-items-in-chart }}
         go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
         cpu-model: ${{ steps.cpu.outputs.model }}

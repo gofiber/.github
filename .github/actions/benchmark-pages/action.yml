@@ -28,6 +28,12 @@ inputs:
     description: CPU the run measured on, stored per run so chart jumps are explainable
     required: false
     default: ''
+  timings-file:
+    description: >-
+      Measured wall seconds per top-level benchmark, stored as shard-timings.txt
+      next to the data for the shard planner. Empty skips it.
+    required: false
+    default: ''
   sync-page:
     description: Copy the shared page; storage's matrix legs publish data only
     required: false
@@ -55,5 +61,6 @@ runs:
         MAX_ITEMS: ${{ inputs.max-items }}
         FORCE_PACKAGE_SUFFIX: ${{ inputs.go-force-package-suffix }}
         CPU_MODEL: ${{ inputs.cpu-model }}
+        TIMINGS_FILE: ${{ inputs.timings-file }}
         SYNC_PAGE: ${{ inputs.sync-page }}
       run: bash "${{ github.action_path }}/sync.sh" .benchmark-pages-sync

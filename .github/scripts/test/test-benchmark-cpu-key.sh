@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Tests the benchmark baseline key logic embedded in benchmark.yml: the GOMAXPROCS
-# pin, the hardware description (including the arm64 fallback), the mixed-hardware
-# join, and the cache-key isolation that keeps a mixed run from inheriting a
-# single-machine baseline.
+# Tests the benchmark hardware identity logic embedded in benchmark.yml: the
+# GOMAXPROCS pin, the hardware description (including the arm64 fallback) and
+# the mixed-hardware join. The description is stored per run in data.js and is
+# what picks the same-CPU baseline out of the published history.
 # Run from anywhere: bash .github/scripts/test/test-benchmark-cpu-key.sh
 
 set -uo pipefail
@@ -69,16 +69,6 @@ describe() { # $1 lscpu fixture, $2 cpuinfo fixture, $3 arch
 # mirrors the merge step's cpu= line
 join_models() { (IFS=+; printf '%s' "$*"); }
 
-# mirrors SAFE_CPU_MODEL in benchmark-report/action.yml
-slug() {
-  local s
-  s="$(printf '%s' "$1" | tr -cs '[:alnum:]._-' '-')"
-  s="${s#-}"
-  printf '%s' "${s%-}"
-}
-
-key() { printf 'benchmark-v2-Linux-%s-%s-' "$(slug "$1")" "$(slug "$2")"; }
-
 echo "--- GOMAXPROCS pin"
 check "4vcpu label"      "4"  "$(pin blacksmith-4vcpu-ubuntu-2404)"
 check "2vcpu label"      "2"  "$(pin blacksmith-2vcpu-ubuntu-2404)"
@@ -111,32 +101,6 @@ INTEL="Intel(R) Xeon(R) Processor (GOMAXPROCS=4)"
 check "single model unchanged" "$AMD"        "$(join_models "$AMD")"
 check "two models joined"      "$AMD+$INTEL" "$(join_models "$AMD" "$INTEL")"
 
-echo "--- cache-key isolation (restore-keys is a prefix match)"
-AMD_KEY="$(key "$AMD" .)"
-MIX_KEY="$(key "$(join_models "$AMD" "$INTEL")" .)"
-check "mixed key differs from single" "different" \
-  "$([ "$AMD_KEY" != "$MIX_KEY" ] && echo different || echo same)"
-# the regression this guards: a mixed run must not restore the AMD baseline
-check "mixed prefix does not match AMD cache" "no" \
-  "$(case "${AMD_KEY}sha" in "$MIX_KEY"*) echo yes ;; *) echo no ;; esac)"
-check "AMD prefix does not match mixed cache" "no" \
-  "$(case "${MIX_KEY}sha" in "$AMD_KEY"*) echo yes ;; *) echo no ;; esac)"
-# a differently sized runner must not reuse the 4-core baseline either
-check "GOMAXPROCS change splits the key" "different" \
-  "$([ "$AMD_KEY" != "$(key "AMD EPYC (GOMAXPROCS=8)" .)" ] && echo different || echo same)"
-
-echo "--- baseline sha from the matched key"
-# mirrors the BASE_SHA extraction in Compare With Baseline
-base_sha() {
-  if [[ "$1" =~ -([0-9a-f]{40})(-[0-9]+)*$ ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi
-}
-SHA40="0123456789abcdef0123456789abcdef01234567"
-check "run-id and attempt suffixed key yields the sha" "$SHA40" \
-  "$(base_sha "${AMD_KEY}${SHA40}-16123456789-2")"
-check "run-id suffixed key yields the sha" "$SHA40" "$(base_sha "${AMD_KEY}${SHA40}-16123456789")"
-check "pre-run-id key still yields the sha" "$SHA40" "$(base_sha "${AMD_KEY}${SHA40}")"
-check "no sha, no baseline ref" "" "$(base_sha "benchmark-plan-weights-lookup")"
-
 echo "--- sources still carry the logic under test"
 check "workflow pins GOMAXPROCS" "yes" \
   "$(grep -qF 'echo "GOMAXPROCS=${procs}" >> "$GITHUB_ENV"' "$WORKFLOW" && echo yes || echo no)"
@@ -154,15 +118,13 @@ check "single-job path forwards it" "yes" \
   "$(grep -qF 'cpu-model: ${{ env.BENCHMARK_CPU }}' "$WORKFLOW" && echo yes || echo no)"
 check "workflow joins every model" "yes" \
   "$(grep -qF 'cpu=$(IFS=+' "$WORKFLOW" && echo yes || echo no)"
-# key() above mirrors the action; a bumped prefix there must be bumped here too
-check "action still builds the v2 prefix" "yes" \
-  "$(grep -qF 'prefix=benchmark-v2-${{ runner.os }}-' "$REPORT_ACTION" && echo yes || echo no)"
-# per-attempt save key, so dispatches AND re-run attempts can store a baseline
-# (GITHUB_RUN_ID alone is stable across re-run attempts and would collide)
-check "action key ends in sha, run id and attempt" "yes" \
-  "$(grep -qF -- '-${BASE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' "$REPORT_ACTION" && echo yes || echo no)"
-# the unique key would let a stale re-run become the newest baseline; the sha gate blocks it
-check "cache save is gated on the head sha" "yes" \
+# the newest published data point doubles as the next baseline, so the run's
+# CPU model must pick it out of the history
+check "compare picks its baseline from the history" "yes" \
+  "$(grep -qF -- '--baseline-cpu "$CPU_MODEL"' "$REPORT_ACTION" && echo yes || echo no)"
+# a re-run of an outdated commit must not append the newest point and thereby
+# turn the baseline back; the sha gate blocks the data publish
+check "data publish is gated on the head sha" "yes" \
   "$(grep -qF 'steps.base-sha.outputs.sha == github.sha' "$REPORT_ACTION" && echo yes || echo no)"
 # what the retest disproved must not become chart history either
 check "publish prefers the verified numbers" "yes" \

@@ -183,10 +183,12 @@ PAGES="$SANDBOX/pages"
 git clone -q "$ORIGIN" "$PAGES" 2> /dev/null
 git -C "$PAGES" checkout -q gh-pages
 
+printf '4.200 github.com/x/root Benchmark_A\n' > "$SANDBOX/timings.txt"
 (
   cd "$REPO"
   DATA_DIR=benchmarks OUTPUT_FILE="$SANDBOX/output.txt" MAX_ITEMS=5 \
     FORCE_PACKAGE_SUFFIX=true SYNC_PAGE=true CPU_MODEL="Ampere-1a (GOMAXPROCS=4)" \
+    TIMINGS_FILE="$SANDBOX/timings.txt" \
     GITHUB_SERVER_URL=https://example.test GITHUB_REPOSITORY=gofiber/fiber \
     bash "$PAGES_DIR/sync.sh" "$PAGES" > "$SANDBOX/sync.log" 2>&1
 ) || { echo "FAIL sync.sh exited non-zero"; cat "$SANDBOX/sync.log"; fails=$((fails + 1)); }
@@ -202,6 +204,9 @@ check "history survives the conversion" "yes" \
   "$(grep -q "aaaaaaa" <<< "$PUBLISHED" && echo yes || echo no)"
 check "the run records its CPU" "yes" \
   "$(grep -q '"cpu":"Ampere-1a (GOMAXPROCS=4)"' <<< "$PUBLISHED" && echo yes || echo no)"
+# the shard planner's wall times ride along in the same commit
+check "the shard timings are published" "4.200 github.com/x/root Benchmark_A" \
+  "$(git -C "$ORIGIN" show gh-pages:benchmarks/shard-timings.txt)"
 # capture before grepping: `git show | grep -q` dies of SIGPIPE under pipefail
 # once the file outgrows the 64K pipe buffer, which the page does
 DEPLOYED="$(git -C "$ORIGIN" show gh-pages:benchmarks/index.html)"
@@ -232,6 +237,8 @@ check "a data-only run leaves the page alone" "1" \
   "$(git -C "$ORIGIN" log gh-pages --format=%s -- benchmarks/index.html | wc -l | tr -d ' ')"
 check "but appends its run" "4" \
   "$(git -C "$ORIGIN" show gh-pages:benchmarks/data.js | python3 -c 'import json,sys; t=sys.stdin.read(); print(len(json.loads(t[t.find("{"):t.rfind("}")+1])["runs"]))')"
+check "a run without timings keeps the published ones" "4.200 github.com/x/root Benchmark_A" \
+  "$(git -C "$ORIGIN" show gh-pages:benchmarks/shard-timings.txt)"
 
 # a sync-only run restores a drifted page, and an unchanged one stays quiet
 git -C "$PAGES" pull -q --rebase > /dev/null 2>&1

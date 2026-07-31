@@ -7,12 +7,14 @@
 # $OUTPUT_FILE           - raw `go test -bench` output to publish; empty = sync only
 # $MAX_ITEMS             - runs to keep in the data (required when publishing)
 # $FORCE_PACKAGE_SUFFIX  - always append the Go package to the series names
+# $TIMINGS_FILE          - shard planner wall times, stored as shard-timings.txt; empty = skip
 # $SYNC_PAGE             - copy the shared page; storage's matrix legs pass false
 set -euo pipefail
 
 CHECKOUT_DIR="$1"
 DATA_DIR="${DATA_DIR:-benchmarks}"
 OUTPUT_FILE="${OUTPUT_FILE:-}"
+TIMINGS_FILE="${TIMINGS_FILE:-}"
 SYNC_PAGE="${SYNC_PAGE:-true}"
 ACTION_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MARKER="gofiber-benchmark-redirect"
@@ -26,6 +28,9 @@ if [[ -n "$OUTPUT_FILE" ]]; then
   COMMIT_TS="$(git log -1 --format=%cI)"
   COMMIT_MSG="$(git log -1 --format=%s)"
   REPO_URL="${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-}"
+fi
+if [[ -n "$TIMINGS_FILE" ]]; then
+  [[ "$TIMINGS_FILE" = /* ]] || TIMINGS_FILE="$PWD/$TIMINGS_FILE"
 fi
 
 cd "$CHECKOUT_DIR"
@@ -42,6 +47,11 @@ if [[ -n "$OUTPUT_FILE" ]]; then
     --commit-message "$COMMIT_MSG" \
     --cpu "${CPU_MODEL:-}" \
     --force-package-suffix "${FORCE_PACKAGE_SUFFIX:-false}"
+fi
+
+# the shard planner reads this via the raw gh-pages URL before the next run
+if [[ -n "$TIMINGS_FILE" && -s "$TIMINGS_FILE" ]]; then
+  cp "$TIMINGS_FILE" "$DATA_DIR/shard-timings.txt"
 fi
 
 # Writes a redirect page, but never clobbers a hand-crafted file: the target

@@ -162,6 +162,79 @@ def compare(base, current, threshold, improve_threshold, min_ns, noise=None):
     return worse, better
 
 
+def load_history(path):
+    """The published v2 data.js as a dict, or None when absent or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return None
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start : end + 1])
+    except ValueError:
+        return None
+    return data if data.get("version") == 2 else None
+
+
+def series_key(name, unit):
+    """A data.js series name mapped back to the (pkg, name, unit) compare key."""
+    series = HISTORY_METRIC_RE.sub("", name)
+    pkg_match = HISTORY_PKG_RE.search(series)
+    pkg = pkg_match.group(1) if pkg_match else ""
+    bare = series[: pkg_match.start()] if pkg_match else series
+    return Key(pkg, bare, unit)
+
+
+def history_baseline(path, cpu):
+    """Newest published run of the same CPU as {Key: value}, plus its commit sha.
+
+    The published data IS the baseline: the report publishes the verified
+    numbers, so the newest column already holds exactly what the old cached
+    baseline file used to duplicate - and unlike a cache entry it cannot be
+    evicted. Runs of other CPU models are skipped for the same reason the old
+    cache key carried the model: a comparison only lines up when both sides
+    saw the same hardware.
+    """
+    data = load_history(path)
+    if not data or not cpu:
+        return {}, ""
+    runs = data.get("runs", [])
+    pick = next((i for i in range(len(runs) - 1, -1, -1) if runs[i].get("cpu") == cpu), None)
+    if pick is None:
+        return {}, ""
+    base = {}
+    for row, name in enumerate(data.get("names", [])):
+        values = data.get("values", [])[row]
+        value = values[pick] if pick < len(values) else None
+        if value is not None:
+            base[series_key(name, data["units"][row])] = value
+    return base, runs[pick].get("id", "")
+
+
+def align_packages(mapping, current):
+    """Attach the run's package to history keys that carry none.
+
+    Repos publishing without the package suffix (single-module storage) name
+    their series bare, while the run's own results always know the package.
+    Only an unambiguous bare name is claimed; a name two packages share stays.
+    """
+    owners = {}
+    for key in current:
+        owners.setdefault((key.name, key.unit), []).append(key)
+    aligned = {}
+    for key, value in mapping.items():
+        if not key.pkg:
+            candidates = owners.get((key.name, key.unit), [])
+            if len(candidates) == 1:
+                aligned[candidates[0]] = value
+                continue
+        aligned[key] = value
+    return aligned
+
+
 def read_history(path):
     """Per-benchmark run-to-run wobble from the published v2 data, {Key: factor}.
 
@@ -169,26 +242,11 @@ def read_history(path):
     their pairwise ratios is that benchmark's own noise band, measured across
     many machines - which is exactly what a same-machine retest cannot see.
     """
-    try:
-        with open(path, encoding="utf-8") as handle:
-            text = handle.read()
-    except OSError:
-        return {}
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end <= start:
-        return {}
-    try:
-        data = json.loads(text[start : end + 1])
-    except ValueError:
-        return {}
-    if data.get("version") != 2:
+    data = load_history(path)
+    if not data:
         return {}
     wobble = {}
     for row, name in enumerate(data.get("names", [])):
-        series = HISTORY_METRIC_RE.sub("", name)
-        pkg_match = HISTORY_PKG_RE.search(series)
-        pkg = pkg_match.group(1) if pkg_match else ""
-        bare = series[: pkg_match.start()] if pkg_match else series
         values = [v for v in data["values"][row] if v is not None]
         parts = []
         ratios = []
@@ -205,7 +263,7 @@ def read_history(path):
             # inflate the floor for the next two weeks
             parts.append(recent[-2] / recent[1])
         if parts:
-            wobble[Key(pkg, bare, data["units"][row])] = rounded(max(parts))
+            wobble[series_key(name, data["units"][row])] = rounded(max(parts))
     return wobble
 
 
@@ -533,7 +591,10 @@ def save_verified(path, results, keep=()):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base", required=True)
+    # explicit baseline file; empty means the newest same-CPU run in --history
+    parser.add_argument("--base", default="")
+    # CPU model this run measured on, to pick its baseline from the history
+    parser.add_argument("--baseline-cpu", default="")
     parser.add_argument("--current", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--threshold", type=factor, default=1.5)
@@ -570,11 +631,21 @@ def main(argv=None):
     args = parser.parse_args(argv)
     improve_threshold = args.improve_threshold or args.threshold
 
-    with open(args.base, encoding="utf-8") as handle:
-        base, _ = parse(handle)
+    baseline_sha = args.baseline_sha
+    if args.base:
+        with open(args.base, encoding="utf-8") as handle:
+            base, _ = parse(handle)
+    else:
+        base, baseline_sha = history_baseline(args.history, args.baseline_cpu)
+        if not base:
+            # the action reads this marker and reports "comparison skipped"
+            print("baseline=none")
+            return 0
     with open(args.current, encoding="utf-8") as handle:
         current, duplicates = parse(handle)
     noise = read_history(args.history) if args.history else {}
+    base = align_packages(base, current)
+    noise = align_packages(noise, current)
 
     worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns, noise)
 
@@ -687,7 +758,7 @@ def main(argv=None):
     shared = len(current.keys() & base.keys())
     ends = [linked(args.commit, args.repo_url)] if args.commit else []
     if args.baseline_ref:
-        sha = "@" + linked(args.baseline_sha, args.repo_url) if args.baseline_sha else ""
+        sha = "@" + linked(baseline_sha, args.repo_url) if baseline_sha else ""
         ends.append(args.baseline_ref + sha)
     notes = [" vs ".join(ends)] if ends else []
     notes.append(f"{shared}/{len(current)} results compared")

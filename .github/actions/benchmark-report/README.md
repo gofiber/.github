@@ -1,7 +1,10 @@
 # benchmark-report
 
-Turns a raw `go test -bench` output file into the PR comparison, the stored baseline
-and the gh-pages publish. Called by [`benchmark.yml`](../../workflows/benchmark.yml)
+Turns a raw `go test -bench` output file into the PR comparison and the gh-pages
+publish. The published data doubles as the baseline: the next run compares against
+the newest data.js column of its own CPU model, so nothing lives in the actions
+cache anymore (whose LRU eviction under repo-wide pressure kept eating the 8 KB
+baselines within hours). Called by [`benchmark.yml`](../../workflows/benchmark.yml)
 from both the single-job and the merged sharded run, so both go through identical
 logic. Inputs are documented in [`action.yml`](action.yml).
 
@@ -127,11 +130,11 @@ The rules of the re-measurement:
   faster on the other is reported as neither. When the posted report already
   agreed with one of the two directions, that side wins - two of three readings
   beat the outlier.
-- A default-branch run stores the verified values as the baseline (`verified.txt`
-  over the raw output). Without that, a one-off spike in main's own run would
-  become the number every following PR is judged against, and the PR-side retest
-  cannot catch a corrupted base: both PR measurements would honestly reproduce
-  the phantom difference.
+- A default-branch run publishes the verified values (`verified.txt` over the raw
+  output), and the newest published column is the baseline. Without that, a
+  one-off spike in main's own run would become the number every following PR is
+  judged against, and the PR-side retest cannot catch a corrupted base: both PR
+  measurements would honestly reproduce the phantom difference.
 - The footer says what happened: `retest: 1/2 regressions, 1/1 improvements
   reproduced, 1 reported re-checked`.
 - The retest is skipped, and the first measurement stands, when more than 100
@@ -167,7 +170,7 @@ Both commit shas link to their commits, `full results` links to the workflow run
 ```bash
 python3 .github/scripts/test/test_benchmark_compare.py   # comparison and fingerprint
 bash .github/scripts/test/test-benchmark-comment.sh      # the comment rules above
-bash .github/scripts/test/test-benchmark-cpu-key.sh      # baseline cache key
+bash .github/scripts/test/test-benchmark-cpu-key.sh      # hardware identity
 ```
 
 `test-benchmark-comment.sh` extracts the comment steps out of `action.yml` and runs
