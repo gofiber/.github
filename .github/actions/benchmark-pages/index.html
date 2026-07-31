@@ -577,8 +577,15 @@
 
     // B/op and allocs/op are rounded integers: a benchmark allocating ~1 byte per
     // op flips between 0 and 1 on iteration luck, which would read as a ±100%
-    // mover. Below these absolute deltas a change is quantization, not signal.
-    const MIN_METRIC_DELTA = { 'ns/op': 1, 'B/op': 16, 'allocs/op': 2 };
+    // mover. Skip only the flip zone: byte moves under one real allocation (Go's
+    // smallest is 8) and the 0/1 allocs zone; a real new allocation moves B/op
+    // by >= 8 too and stays visible. The ns/op entry is different in kind: it
+    // damps sub-nanosecond alignment wobble, mirroring the report's alert-min-ns.
+    const MIN_METRIC_DELTA = { 'ns/op': 1, 'B/op': 8 };
+    function quantizationNoise(metric, a, b) {
+      if (metric === 'allocs/op') return Math.max(a, b) <= 1;
+      return Math.abs(a - b) < (MIN_METRIC_DELTA[metric] || 0);
+    }
 
     // Latest value vs the median of up to 10 previous runs. The median damps
     // single-run benchmark noise that a plain last-vs-previous compare amplifies.
@@ -597,7 +604,7 @@
       const mid = prior.length >> 1;
       const median = prior.length % 2 ? prior[mid] : (prior[mid - 1] + prior[mid]) / 2;
       if (!median) return null;
-      if (Math.abs(arr[latestIdx] - median) < (MIN_METRIC_DELTA[metric] || 0)) return null;
+      if (quantizationNoise(metric, arr[latestIdx], median)) return null;
       return { pct: ((arr[latestIdx] - median) / median) * 100, latest: arr[latestIdx], baseline: median };
     }
 

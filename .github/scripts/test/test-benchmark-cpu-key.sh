@@ -128,9 +128,11 @@ check "GOMAXPROCS change splits the key" "different" \
 echo "--- baseline sha from the matched key"
 # mirrors the BASE_SHA extraction in Compare With Baseline
 base_sha() {
-  if [[ "$1" =~ -([0-9a-f]{40})(-[0-9]+)?$ ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi
+  if [[ "$1" =~ -([0-9a-f]{40})(-[0-9]+)*$ ]]; then printf '%s' "${BASH_REMATCH[1]}"; fi
 }
 SHA40="0123456789abcdef0123456789abcdef01234567"
+check "run-id and attempt suffixed key yields the sha" "$SHA40" \
+  "$(base_sha "${AMD_KEY}${SHA40}-16123456789-2")"
 check "run-id suffixed key yields the sha" "$SHA40" "$(base_sha "${AMD_KEY}${SHA40}-16123456789")"
 check "pre-run-id key still yields the sha" "$SHA40" "$(base_sha "${AMD_KEY}${SHA40}")"
 check "no sha, no baseline ref" "" "$(base_sha "benchmark-plan-weights-lookup")"
@@ -155,9 +157,10 @@ check "workflow joins every model" "yes" \
 # key() above mirrors the action; a bumped prefix there must be bumped here too
 check "action still builds the v2 prefix" "yes" \
   "$(grep -qF 'prefix=benchmark-v2-${{ runner.os }}-' "$REPORT_ACTION" && echo yes || echo no)"
-# per-run save key, so re-runs on an unchanged default branch can store a baseline
-check "action key ends in sha and run id" "yes" \
-  "$(grep -qF -- '-${BASE_SHA}-${GITHUB_RUN_ID}' "$REPORT_ACTION" && echo yes || echo no)"
+# per-attempt save key, so dispatches AND re-run attempts can store a baseline
+# (GITHUB_RUN_ID alone is stable across re-run attempts and would collide)
+check "action key ends in sha, run id and attempt" "yes" \
+  "$(grep -qF -- '-${BASE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}' "$REPORT_ACTION" && echo yes || echo no)"
 # the unique key would let a stale re-run become the newest baseline; the sha gate blocks it
 check "cache save is gated on the head sha" "yes" \
   "$(grep -qF 'steps.base-sha.outputs.sha == github.sha' "$REPORT_ACTION" && echo yes || echo no)"

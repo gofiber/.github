@@ -194,6 +194,10 @@ def main():
         return
     if sys.argv[1:2] == ["record"]:
         # shard job: `go test ... | record <pkg> <timings-file> | tee ...`
+        # test output is not guaranteed clean UTF-8, and the old plain-tee pipe
+        # was byte-transparent; a stray byte must not take the whole shard down
+        sys.stdin.reconfigure(errors="replace")
+        sys.stdout.reconfigure(errors="replace")
         record(sys.argv[2], sys.argv[3])
         return
 

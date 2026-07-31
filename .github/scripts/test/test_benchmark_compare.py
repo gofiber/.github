@@ -137,23 +137,30 @@ def test_a_zero_ratio_still_renders():
 
 def test_quantization_flips_of_rounded_units_are_ignored():
     # Benchmark_Ctx_Links flipped 1 -> 0 B/op between identical commits and was
-    # reported as an "∞x" improvement; rounded integer units carry no signal in
-    # deltas of a few bytes or a single alloc, whatever the ratio says
+    # reported as an "∞x" improvement; only the flip zone is silenced: byte moves
+    # under one real allocation, and the 0<->1 allocs zone
     bop = compare.Key("p", "B", "B/op")
     allocs = compare.Key("p", "B", "allocs/op")
-    for base, current in ((1.0, 0.0), (0.0, 1.0), (24.0, 32.0)):
+    for base, current in ((1.0, 0.0), (0.0, 1.0), (24.0, 31.0)):
         worse, better = compare.compare({bop: base}, {bop: current}, 1.5, 1.1, 1.0)
         assert not worse and not better, (base, current, worse, better)
-    for base, current in ((1.0, 0.0), (0.0, 1.0), (1.0, 2.0)):
+    for base, current in ((1.0, 0.0), (0.0, 1.0)):
         worse, better = compare.compare({allocs: base}, {allocs: current}, 1.5, 1.1, 1.0)
         assert not worse and not better, (base, current, worse, better)
 
 
 def test_real_memory_changes_stay_reported():
-    # a genuinely new allocation per op is signal, even when the ratio is infinite
+    # a genuinely new allocation per op is signal, even when the ratio is infinite:
+    # Go's smallest allocation moves B/op by 8, and past the 0/1 zone every alloc
+    # step (1 -> 2, 0 -> 2) must stay alertable for a zero-allocation framework
     bop = compare.Key("p", "B", "B/op")
-    worse, better = compare.compare({bop: 0.0}, {bop: 24.0}, 1.5, 1.1, 1.0)
+    allocs = compare.Key("p", "B", "allocs/op")
+    worse, better = compare.compare({bop: 0.0}, {bop: 8.0}, 1.5, 1.1, 1.0)
     assert [c.key for c in worse] == [bop] and not better
+    worse, better = compare.compare({allocs: 1.0}, {allocs: 2.0}, 1.5, 1.1, 1.0)
+    assert [c.key for c in worse] == [allocs] and not better
+    worse, better = compare.compare({allocs: 0.0}, {allocs: 2.0}, 1.5, 1.1, 1.0)
+    assert [c.key for c in worse] == [allocs] and not better
     worse, better = compare.compare({bop: 200.0}, {bop: 100.0}, 1.5, 1.1, 1.0)
     assert not worse and [c.key for c in better] == [bop]
 

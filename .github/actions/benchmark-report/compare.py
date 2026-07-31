@@ -40,8 +40,17 @@ RETEST_MAX = 100
 # and as a ratio such a flip is infinite - no multiplicative threshold, noise
 # band or same-machine retest can absorb it (observed: Benchmark_Ctx_Links
 # 1 -> 0 B/op reported as an "∞x" improvement between identical commits).
-# Below these absolute deltas the unit carries no signal, whatever the ratio.
-MIN_UNIT_DELTA = {"B/op": 16.0, "allocs/op": 2.0}
+# Only the flip zone is silenced: byte moves under one real allocation (Go's
+# smallest is 8), and the 0<->1 allocs/op zone. A genuinely new allocation
+# always moves B/op by >= 8 too, so it stays visible; 1 -> 2 allocs still alerts.
+MIN_UNIT_DELTA = {"B/op": 8.0}
+
+
+def quantization_noise(unit, base, current):
+    """Whether a change sits inside the rounding wobble of an integer unit."""
+    if unit == "allocs/op":
+        return max(base, current) <= 1
+    return abs(current - base) < MIN_UNIT_DELTA.get(unit, 0.0)
 # How the published history's series names carry package and metric, and how far
 # above a benchmark's own historic wobble its personal threshold sits. The margin
 # is deliberately thin: the wobble is already the tail of observed noise.
@@ -140,7 +149,7 @@ def compare(base, current, threshold, improve_threshold, min_ns, noise=None):
     for key, value in current.items():
         if key not in base or (key.pkg, key.name) in too_fast:
             continue
-        if abs(value - base[key]) < MIN_UNIT_DELTA.get(key.unit, 0.0):
+        if quantization_noise(key.unit, base[key], value):
             continue
         change = Change(key, base[key], value, ratio(key.unit, base[key], value))
         bar, improve_bar = bars(key, threshold, improve_threshold, noise)

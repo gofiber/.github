@@ -151,12 +151,14 @@ runs:
         SAFE_CPU_MODEL="${SAFE_CPU_MODEL%-}"
         WD_SLUG="$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')"
         # Restores walk restore-keys to the newest cache of the same OS/CPU/module.
-        # The run id keeps the save key unique: a cache key can never be overwritten,
-        # and without it a re-run or dispatch on an unchanged default branch could
-        # not store its fresh baseline. Old entries age out via cache eviction.
+        # The run id plus attempt keeps the save key unique: a cache key can never
+        # be overwritten, and without both a dispatch or a re-run attempt on an
+        # unchanged default branch could not store its fresh baseline (the run id
+        # alone stays the same across re-run attempts). Old entries age out via
+        # cache eviction.
         # v2 caches hold the raw benchmark output, v1 held a github-action-benchmark JSON.
         echo "prefix=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-" >> "$GITHUB_OUTPUT"
-        echo "key=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+        echo "key=benchmark-v2-${{ runner.os }}-${SAFE_CPU_MODEL}-${WD_SLUG}-${BASE_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
 
     - name: Get Benchmark Results from Default branch
       id: cache
@@ -228,6 +230,9 @@ runs:
         RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       run: |
         set -euo pipefail
+        # a tracked or setup-script-left file must not pose as this run's retest
+        # output: the publish and store steps treat its presence as "a retest ran"
+        rm -f verified.txt
         if [[ "${COMPARABLE}" != "true" ]]; then
           exit 0
         fi
@@ -237,8 +242,8 @@ runs:
         fi
         # restore-keys can hand back an older cache than the current default branch
         # head, and a stale baseline is the usual reason a number looks off. The key
-        # ends in <sha>-<run id>; caches from before the run id suffix end in the bare sha.
-        if [[ "$MATCHED_KEY" =~ -([0-9a-f]{40})(-[0-9]+)?$ ]]; then
+        # ends in <sha>-<run id>-<attempt>; older caches carry fewer numeric suffixes.
+        if [[ "$MATCHED_KEY" =~ -([0-9a-f]{40})(-[0-9]+)*$ ]]; then
           BASE_SHA="${BASH_REMATCH[1]}"
         else
           BASE_SHA=""
