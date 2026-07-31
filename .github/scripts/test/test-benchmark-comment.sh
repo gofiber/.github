@@ -102,13 +102,15 @@ check "nothing to say, nothing posted" "" "$(post false true '' false)"
 # the point of the whole exercise: a commit that moved nothing must not comment again
 check "unchanged findings only refresh" "PATCH repos/o/r/issues/comments/42;" \
   "$(post true false 42 false)"
-check "unchanged findings refresh even when buried" "PATCH repos/o/r/issues/comments/42;" \
+check "a buried report with unchanged findings is left alone" "" \
   "$(post true false 42 true)"
 check "changed findings refresh while the report is last" "PATCH repos/o/r/issues/comments/42;" \
   "$(post true true 42 false)"
 check "changed findings behind chatter get a fresh comment" \
   "POST repos/o/r/issues/7/comments;" "$(post true true 42 true)"
-check "a fixed regression is cleared in place" "PATCH repos/o/r/issues/comments/42;" \
+check "a fixed regression is cleared in place while last" "PATCH repos/o/r/issues/comments/42;" \
+  "$(post false true 42 false)"
+check "a buried regression gets a fresh all-clear comment" "POST repos/o/r/issues/7/comments;" \
   "$(post false true 42 true)"
 check "an already clean report stays untouched" "" "$(post false false 42 true)"
 check "a push comments on the commit" "POST repos/o/r/commits/deadbeef/comments;" \
