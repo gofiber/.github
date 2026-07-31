@@ -25,20 +25,21 @@ action is allowed to be loud exactly once per finding.
 
 - **Nothing significant, nothing posted.** No comment at all until a benchmark
   crosses `alert-threshold` or `improve-threshold`.
-- **Refresh in place, do not repost.** Editing a comment sends no notification, so
-  the posted report is patched with the current numbers as long as it holds. A new
-  comment is only created when both of these are true:
-  1. the findings actually changed (see below), and
-  2. the posted report has been buried under someone else's comment, so refreshing
-     it would go unseen.
+- **Refresh in place only while the report is the last comment.** Editing a comment
+  sends no notification, so a report that is still the last word in the thread is
+  patched with the current numbers. Once someone replied below it, the report is
+  what that reply quoted and is never edited again: a new comment is posted instead,
+  but only once the findings actually changed (see below). A buried report whose
+  findings still hold is left untouched.
 - **Superseded reports are hidden.** When a new comment is posted, the one it
   replaces is minimized as outdated (the GraphQL `minimizeComment` mutation with
   classifier `OUTDATED`): GitHub folds it away and labels it, its body and marker
   stay intact. At most one report per module is ever visible.
-- **A fixed regression is cleared in place.** Once the numbers moved far enough to
-  count as fixed (see below) the posted report is patched down to a one-line all
-  clear. It is never deleted, so a flapping benchmark cannot notify the PR twice by
-  removing and reposting the same comment.
+- **A fixed regression is cleared, not deleted.** Once the numbers moved far enough
+  to count as fixed (see below) the report is patched down to a one-line all clear
+  while it is still the last comment, or superseded by a new all-clear comment once
+  it is buried. It is never deleted, so a flapping benchmark cannot notify the PR
+  twice by removing and reposting the same comment.
 - **Sibling modules do not bury each other.** A repo like `storage` posts one report
   per package. Those count as the bot's own noise, only foreign comments bury a
   report.

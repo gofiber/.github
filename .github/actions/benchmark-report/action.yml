@@ -337,8 +337,8 @@ runs:
         printf '%s\ncompared=true\n' "$output" >> "$GITHUB_OUTPUT"
 
     # Comment rules in full: see README.md next to this file. Short version: refresh
-    # in place while the findings hold, comment again only once they really changed
-    # and the old report has been buried, and hide whatever gets superseded.
+    # in place only while the report is the last comment, post a new one once it is
+    # buried and the findings changed, and hide whatever gets superseded.
     - name: Post Benchmark Report
       continue-on-error: true
       if: >-
@@ -375,10 +375,15 @@ runs:
         if [[ "$CHANGED" != "true" && "$SIGNIFICANT" != "true" ]]; then
           exit 0
         fi
-        # editing sends no notification, so the numbers stay current for free as long
-        # as the findings hold or the report is still the last word in the thread
-        if [[ "$CHANGED" != "true" || "$BURIED" != "true" || "$SIGNIFICANT" != "true" ]]; then
+        # editing sends no notification, so the numbers stay current for free, but
+        # only while the report is still the last word in the thread
+        if [[ "$BURIED" != "true" ]]; then
           gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@comment.md > /dev/null
+          exit 0
+        fi
+        # a buried report is what the thread below it replied to: never rewritten,
+        # only superseded by a new comment once the findings moved
+        if [[ "$CHANGED" != "true" ]]; then
           exit 0
         fi
         gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
