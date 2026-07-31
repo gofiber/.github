@@ -161,6 +161,9 @@ check "action key ends in sha and run id" "yes" \
 # the unique key would let a stale re-run become the newest baseline; the sha gate blocks it
 check "cache save is gated on the head sha" "yes" \
   "$(grep -qF 'steps.base-sha.outputs.sha == github.sha' "$REPORT_ACTION" && echo yes || echo no)"
+# what the retest disproved must not become chart history either
+check "publish prefers the verified numbers" "yes" \
+  "$(grep -qF "hashFiles('verified.txt') != '' && 'verified.txt'" "$REPORT_ACTION" && echo yes || echo no)"
 
 echo
 if [ "$fails" -gt 0 ]; then

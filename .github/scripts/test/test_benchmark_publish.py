@@ -96,6 +96,28 @@ def test_extract_names_series_like_the_gab_extractor_did():
     assert values["Benchmark_NewError (github.com/gofiber/fiber/v3) - B/op"] == 24.0
 
 
+def test_extract_reads_the_verified_shape_identically():
+    # after a retest the action publishes verified.txt instead of the raw output:
+    # same run, disproven values replaced, names carrying a sacrificial -1 suffix
+    # and an iteration count of 1. The series must line up with the raw ones,
+    # otherwise every retested run would fork the chart history.
+    verified = "\n".join(
+        [
+            "pkg: github.com/gofiber/fiber/v3",
+            "BenchmarkAppendMsg-1\t1\t16.19 ns/op\t1977.09 MB/s\t0 B/op\t0 allocs/op",
+            "Benchmark_Ctx_Get/header-8-1\t1\t0.50 ns/op",
+            "Benchmark_NewError-1\t1\t58.00 ns/op\t24 B/op\t1 allocs/op",
+            "ok  \tgithub.com/gofiber/fiber/v3\t3.6s",
+            "pkg: github.com/gofiber/fiber/v3/binder",
+            "Benchmark_NewError-1\t1\t1118 ns/op\t160 B/op\t8 allocs/op",
+            "ok  \tgithub.com/gofiber/fiber/v3/binder\t1.0s",
+        ]
+    ) + "\n"
+    raw = {(name, unit): value for name, unit, value in publish.extract(OUTPUT, force_package_suffix=True)}
+    ver = {(name, unit): value for name, unit, value in publish.extract(verified, force_package_suffix=True)}
+    assert raw == ver, sorted(raw.keys() ^ ver.keys())
+
+
 def test_extract_only_suffixes_multi_package_output():
     single = "pkg: github.com/gofiber/storage/redis/v3\nBenchmark_Redis_Set-4\t10\t100 ns/op\t278 B/op\t9 allocs/op\n"
     names = [name for name, _, _ in publish.extract(single, force_package_suffix=False)]

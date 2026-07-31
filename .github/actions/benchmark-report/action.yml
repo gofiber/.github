@@ -461,8 +461,12 @@ runs:
       uses: gofiber/.github/.github/actions/benchmark-pages@main
       with:
         data-dir: ${{ inputs.benchmark-data-dir-path }}
-        # empty when this runner's CPU is not the pinned one: page sync only
-        output-file: ${{ steps.cpu.outputs.publish == 'true' && inputs.output-file || '' }}
+        # empty when this runner's CPU is not the pinned one: page sync only.
+        # After a retest the verified numbers are published instead of the raw
+        # ones: a value the retest disproved reaches neither the charts nor the
+        # overview nor the noise-band training data. Below the bars the raw
+        # wobble still publishes, which is what the noise band learns from.
+        output-file: ${{ steps.cpu.outputs.publish == 'true' && (hashFiles('verified.txt') != '' && 'verified.txt' || inputs.output-file) || '' }}
         max-items: ${{ inputs.max-items-in-chart }}
         go-force-package-suffix: ${{ inputs.go-force-package-suffix }}
         cpu-model: ${{ steps.cpu.outputs.model }}

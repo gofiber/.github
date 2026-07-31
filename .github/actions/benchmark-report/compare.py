@@ -35,6 +35,13 @@ UNITS = ("ns/op", "MB/s", "B/op", "allocs/op")
 # A run where this many benchmarks moved is not having a noise problem, and
 # re-measuring them would cost a good part of the full suite again.
 RETEST_MAX = 100
+# B/op and allocs/op are integers rounded from an amortized total: a benchmark
+# allocating ~1 byte per op flips between 0 and 1 on iteration-count luck alone,
+# and as a ratio such a flip is infinite - no multiplicative threshold, noise
+# band or same-machine retest can absorb it (observed: Benchmark_Ctx_Links
+# 1 -> 0 B/op reported as an "∞x" improvement between identical commits).
+# Below these absolute deltas the unit carries no signal, whatever the ratio.
+MIN_UNIT_DELTA = {"B/op": 16.0, "allocs/op": 2.0}
 # How the published history's series names carry package and metric, and how far
 # above a benchmark's own historic wobble its personal threshold sits. The margin
 # is deliberately thin: the wobble is already the tail of observed noise.
@@ -132,6 +139,8 @@ def compare(base, current, threshold, improve_threshold, min_ns, noise=None):
     worse, better = [], []
     for key, value in current.items():
         if key not in base or (key.pkg, key.name) in too_fast:
+            continue
+        if abs(value - base[key]) < MIN_UNIT_DELTA.get(key.unit, 0.0):
             continue
         change = Change(key, base[key], value, ratio(key.unit, base[key], value))
         bar, improve_bar = bars(key, threshold, improve_threshold, noise)

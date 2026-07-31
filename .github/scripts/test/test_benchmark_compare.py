@@ -116,11 +116,11 @@ def test_throughput_loss_is_reported():
 
 
 def test_dropping_to_zero_is_an_improvement_not_a_regression():
-    # allocs 1 -> 0 and 0 -> 1 both divide by zero, they must not land in the same bucket
+    # allocs 5 -> 0 and 0 -> 5 both divide by zero, they must not land in the same bucket
     key = compare.Key("p", "B", "allocs/op")
-    worse, better = compare.compare({key: 1.0}, {key: 0.0}, 1.5, 1.1, 1.0)
+    worse, better = compare.compare({key: 5.0}, {key: 0.0}, 1.5, 1.1, 1.0)
     assert not worse and [c.key for c in better] == [key]
-    worse, better = compare.compare({key: 0.0}, {key: 1.0}, 1.5, 1.1, 1.0)
+    worse, better = compare.compare({key: 0.0}, {key: 5.0}, 1.5, 1.1, 1.0)
     assert [c.key for c in worse] == [key] and not better
     # and the same for a throughput metric, where the direction is flipped
     rate = compare.Key("p", "B", "MB/s")
@@ -130,9 +130,32 @@ def test_dropping_to_zero_is_an_improvement_not_a_regression():
 
 def test_a_zero_ratio_still_renders():
     key = compare.Key("p", "B", "allocs/op")
-    _, better = compare.compare({key: 1.0}, {key: 0.0}, 1.5, 1.1, 1.0)
+    _, better = compare.compare({key: 5.0}, {key: 0.0}, 1.5, 1.1, 1.0)
     rows = compare.group(better, True)
     assert "∞x" in "\n".join(compare.table(rows, 10, True, 1.5, {}))
+
+
+def test_quantization_flips_of_rounded_units_are_ignored():
+    # Benchmark_Ctx_Links flipped 1 -> 0 B/op between identical commits and was
+    # reported as an "∞x" improvement; rounded integer units carry no signal in
+    # deltas of a few bytes or a single alloc, whatever the ratio says
+    bop = compare.Key("p", "B", "B/op")
+    allocs = compare.Key("p", "B", "allocs/op")
+    for base, current in ((1.0, 0.0), (0.0, 1.0), (24.0, 32.0)):
+        worse, better = compare.compare({bop: base}, {bop: current}, 1.5, 1.1, 1.0)
+        assert not worse and not better, (base, current, worse, better)
+    for base, current in ((1.0, 0.0), (0.0, 1.0), (1.0, 2.0)):
+        worse, better = compare.compare({allocs: base}, {allocs: current}, 1.5, 1.1, 1.0)
+        assert not worse and not better, (base, current, worse, better)
+
+
+def test_real_memory_changes_stay_reported():
+    # a genuinely new allocation per op is signal, even when the ratio is infinite
+    bop = compare.Key("p", "B", "B/op")
+    worse, better = compare.compare({bop: 0.0}, {bop: 24.0}, 1.5, 1.1, 1.0)
+    assert [c.key for c in worse] == [bop] and not better
+    worse, better = compare.compare({bop: 200.0}, {bop: 100.0}, 1.5, 1.1, 1.0)
+    assert not worse and [c.key for c in better] == [bop]
 
 
 def test_slower_nanoseconds_are_reported():
