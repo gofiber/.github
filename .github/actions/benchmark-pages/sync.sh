@@ -133,16 +133,19 @@ else
   git commit -m "Sync benchmark page"
 fi
 
-# Parallel benchmark matrix legs may push to gh-pages at the same time.
-for attempt in 1 2 3 4 5; do
+# Parallel benchmark matrix legs may push to gh-pages at the same time (storage
+# finishes 33 of them within a minute); the jittered backoff spreads the herd so
+# the retries stop colliding with each other, which 5 immediate ones did.
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if git push; then
     exit 0
   fi
   echo "Push failed (attempt ${attempt}), rebasing onto remote gh-pages"
+  sleep "$((RANDOM % 8 + attempt))"
   if ! git pull --rebase; then
     # keep retrying on transient errors instead of dying under set -e
     git rebase --abort 2>/dev/null || true
   fi
 done
-echo "Failed to push the benchmark page after 5 attempts" >&2
+echo "Failed to push the benchmark page after 10 attempts" >&2
 exit 1
