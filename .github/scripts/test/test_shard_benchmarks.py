@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Self-check for shard_benchmarks: run it directly, it asserts and prints OK."""
 import io
+import os
 import pathlib
 import sys
+import tempfile
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import shard_benchmarks as sb  # noqa: E402
@@ -156,6 +158,62 @@ def test_empty_weights_keep_the_round_robin_untouched():
     pairs = sb.parse(io.StringIO(LIST_OUTPUT))
     for i in range(3):
         assert sb.shard(pairs, i, 3, {}) == sb.shard(pairs, i, 3)
+
+
+def test_record_times_each_top_and_passes_output_through():
+    lines = [
+        "goos: linux\n",
+        "pkg: github.com/x/root\n",
+        "Benchmark_Big/a-4\t10\t100.00 ns/op\n",
+        "Benchmark_Big/b-4\t10\t100.00 ns/op\n",
+        "some test log noise\n",
+        "Benchmark_Small-4\t10\t100.00 ns/op\n",
+        "PASS\n",
+        "ok  \tgithub.com/x/root\t9.0s\n",
+    ]
+    # anchor 0, pkg header 1, then: Big/a at 4 (+3), Big/b at 5 (+1),
+    # noise at 6 charges the next result, Small at 9 (+4 incl. the noise)
+    ticks = iter([0.0, 1.0, 4.0, 5.0, 6.0, 9.0, 9.0, 9.0])
+    out = io.StringIO()
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "timings.txt")
+        sb.record("github.com/x/root", path, stream=iter(lines), sink=out, clock=lambda: next(ticks))
+        recorded = open(path).read()
+    # the compile gap before the first line is never attributed to a benchmark
+    assert out.getvalue() == "".join(lines)
+    assert recorded == (
+        "4.000 github.com/x/root Benchmark_Big\n"
+        "4.000 github.com/x/root Benchmark_Small\n"
+    ), recorded
+
+
+def test_read_timings_floors_sums_and_survives_garbage():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("4.000 p Benchmark_Big\n")
+            handle.write("1.000 p Benchmark_Big\n")
+            handle.write("0.000 p Benchmark_Tiny\n")
+            handle.write("not a timing line\n")
+            handle.write("oops p Benchmark_Bad\n")
+        timings = sb.read_timings(path)
+    # duplicates sum, a mismeasured zero is floored so LPT cannot stack "free"
+    # benchmarks onto one shard, garbage lines are dropped
+    assert timings == {"p Benchmark_Big": 5.0, "p Benchmark_Tiny": 0.1}, timings
+    assert sb.read_timings("/nonexistent/timings.txt") == {}
+
+
+def test_combined_weights_prefers_measured_seconds():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "t.txt")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("62.000 github.com/x/proxy Benchmark_Fast\n")
+        weights = sb.combined_weights(BASELINE, path)
+    # the baseline guessed 37 from the package total, the measurement knows better
+    assert weights["github.com/x/proxy Benchmark_Fast"] == 62.0, weights
+    # everything unmeasured keeps the baseline guess
+    assert weights["github.com/x/proxy Benchmark_Fast2"] == 37.0, weights
+    assert sb.combined_weights(BASELINE, None) == sb.weigh(BASELINE)
 
 
 if __name__ == "__main__":

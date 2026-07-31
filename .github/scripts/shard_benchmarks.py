@@ -15,12 +15,20 @@ and setup outside the timer (proxy starts real servers) never shows in ns/op.
 With WEIGHTS set (JSON from `shard_benchmarks.py weights`, fed the last merged
 baseline output by the plan job), the split balances measured seconds instead of
 counting functions; without it, the old round-robin stands.
+
+The baseline alone still guesses: it smears a package's wall time evenly over
+its variants, and one function hiding a minute of untimed setup (proxy's
+StripHopByHop) looks as cheap as its neighbours. So each shard pipes its
+`go test` output through `record`, which stamps every finished result line and
+writes real seconds per top-level function; merged and cached next to the
+baseline, those measurements replace the guess on the next run.
 """
 import json
 import math
 import os
 import re
 import sys
+import time
 
 # a variant without history is assumed to cost about one benchtime plus ramp-up
 BASE_SECONDS = 1.2
@@ -84,6 +92,68 @@ def weigh(text):
     return weights
 
 
+def record(pkg, out_path, stream=sys.stdin, sink=sys.stdout, clock=time.monotonic):
+    """Tee `go test` output through unchanged, appending `<secs> <pkg> <top>` lines.
+
+    A result line completes when its benchmark finishes, so the delta since the
+    last event covers the run plus any setup before it. Compile time falls before
+    the first line and is never attributed. Go writes stdout unbuffered, so the
+    stamps are taken as the benchmarks actually finish, not when a buffer flushes.
+    """
+    tops, order, prev = {}, [], None
+    for line in stream:
+        now = clock()
+        if prev is None:
+            prev = now
+        m = BENCH_NAME_RE.match(line)
+        if m:
+            top = m.group(1).partition("/")[0]
+            if top not in tops:
+                tops[top] = 0.0
+                order.append(top)
+            tops[top] += now - prev
+            prev = now
+        elif OK_RE.match(line) or PKG_HEADER_RE.match(line):
+            prev = now
+        sink.write(line)
+        sink.flush()
+    with open(out_path, "a", encoding="utf-8") as handle:
+        for top in order:
+            handle.write(f"{tops[top]:.3f} {pkg} {top}\n")
+
+
+def read_timings(path):
+    """{"<pkg> <top>": secs} from recorded lines; malformed lines are dropped.
+
+    The floor keeps a mismeasured near-zero from letting LPT stack every "free"
+    benchmark onto whichever shard happens to be lightest at the time.
+    """
+    timings = {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                parts = line.split()
+                if len(parts) != 3:
+                    continue
+                try:
+                    secs = float(parts[0])
+                except ValueError:
+                    continue
+                key = f"{parts[1]} {parts[2]}"
+                timings[key] = timings.get(key, 0.0) + max(secs, 0.1)
+    except OSError:
+        return {}
+    return timings
+
+
+def combined_weights(baseline_text, timings_path=None):
+    """Baseline guess for every benchmark, overridden by measured wall seconds."""
+    weights = weigh(baseline_text)
+    if timings_path:
+        weights.update(read_timings(timings_path))
+    return weights
+
+
 def shard(pairs, index, total, weights=None):
     """Deterministic split, identical on every shard, each benchmark in exactly one.
 
@@ -116,9 +186,15 @@ def render(selected):
 
 
 def main():
-    if sys.argv[1:] == ["weights"]:
-        # plan job: the last merged baseline output on stdin, weights JSON on stdout
-        print(json.dumps(weigh(sys.stdin.read()), separators=(",", ":"), sort_keys=True))
+    if sys.argv[1:2] == ["weights"]:
+        # plan job: the last merged baseline output on stdin, optionally a recorded
+        # timings file as argv[2] (missing file just means no overrides), JSON out
+        timings = sys.argv[2] if len(sys.argv) > 2 and os.path.isfile(sys.argv[2]) else None
+        print(json.dumps(combined_weights(sys.stdin.read(), timings), separators=(",", ":"), sort_keys=True))
+        return
+    if sys.argv[1:2] == ["record"]:
+        # shard job: `go test ... | record <pkg> <timings-file> | tee ...`
+        record(sys.argv[2], sys.argv[3])
         return
 
     index = int(os.environ["SHARD_INDEX"])

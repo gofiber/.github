@@ -9,6 +9,13 @@ inputs:
     description: Raw benchmark output to process
     required: false
     default: output.txt
+  timings-file:
+    description: >-
+      Measured wall seconds per top-level benchmark, recorded by the sharded run.
+      Stored next to the baseline so the next run's plan job balances the shards
+      on real seconds. Empty skips it.
+    required: false
+    default: ''
   cpu-model:
     description: >-
       CPU the benchmarks actually ran on. Sharded runs pass the model reported by
@@ -406,6 +413,7 @@ runs:
       shell: bash
       env:
         OUTPUT_FILE: ${{ inputs.output-file }}
+        TIMINGS_FILE: ${{ inputs.timings-file }}
       run: |
         set -euo pipefail
         mkdir -p ./cache
@@ -415,6 +423,9 @@ runs:
           cp verified.txt ./cache/baseline.txt
         else
           cp "$OUTPUT_FILE" ./cache/baseline.txt
+        fi
+        if [[ -n "$TIMINGS_FILE" && -s "$TIMINGS_FILE" ]]; then
+          cp "$TIMINGS_FILE" ./cache/timings.txt
         fi
 
     - name: Update Benchmark Results cache
