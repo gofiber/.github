@@ -39,7 +39,8 @@ jobs:
     outputs:
       packages: ${{ steps.set-packages.outputs.packages }}
     steps:
-      # Shallow is enough: paths-filter reads the PR file list from the REST API
+      # Shallow is enough: paths-filter reads the PR file list from the REST API and
+      # fetches just the push base commit when it diffs one
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Discover modules
@@ -69,18 +70,22 @@ jobs:
           fi
 
           # Build dorny/paths-filter YAML
-          # _shared catches files at the module-dir root (e.g. .golangci.yml,
-          # go.work) that affect all modules but live outside any single one.
+          # _shared fans out to every module, so it lists only files that can change
+          # any module's lint result: the config, the workspace, and the calling
+          # workflow (golangci-lint version/args live there). A root README must not.
+          prefix=""
+          [ "$MODULE_DIR" = "." ] || prefix="${MODULE_DIR}/"
+          caller="${GITHUB_WORKFLOW_REF:-}"; caller="${caller%%@*}"
           {
             echo "filters<<EOF"
             for mod in $modules; do
               echo "${mod}: \"${mod}/**\""
             done
-            if [ "$MODULE_DIR" = "." ]; then
-              echo '_shared: "*"'
-            else
-              echo "_shared: \"${MODULE_DIR}/*\""
-            fi
+            echo "_shared:"
+            for f in .golangci.yml .golangci.yaml go.work go.work.sum; do
+              echo "  - \"${prefix}${f}\""
+            done
+            echo "  - \"${caller#*/*/}\""
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -88,8 +93,10 @@ jobs:
           all=$(printf '%s\n' $modules | jq -Rsc 'split("\n") | map(select(length > 0))')
           echo "all=${all}" >> "$GITHUB_OUTPUT"
 
+      # PRs use the REST file list, pushes diff against github.event.before - the
+      # shallow checkout still works, paths-filter fetches that commit on its own.
       - name: Filter changes
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || github.event_name == 'push'
         id: filter
         uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4
         with:
@@ -98,18 +105,16 @@ jobs:
       - name: Set packages
         id: set-packages
         shell: bash
+        env:
+          CHANGES: ${{ steps.filter.outputs.changes }}
+          ALL: ${{ steps.discover.outputs.all }}
         run: |
-          # Push / workflow_dispatch → all modules; PR → only changed modules
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            changes='${{ steps.filter.outputs.changes }}'
-            # If shared/root files changed, lint all modules
-            if printf '%s' "$changes" | jq -e 'index("_shared")' > /dev/null 2>&1; then
-              packages='${{ steps.discover.outputs.all }}'
-            else
-              packages="$changes"
-            fi
+          # No filter ran (workflow_dispatch/schedule) or a shared file changed → all
+          # modules; PR and push → only the modules the diff touched.
+          if [ -z "$CHANGES" ] || printf '%s' "$CHANGES" | jq -e 'index("_shared")' > /dev/null 2>&1; then
+            packages="$ALL"
           else
-            packages='${{ steps.discover.outputs.all }}'
+            packages="$CHANGES"
           fi
           [ -z "$packages" ] && packages="[]"
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
