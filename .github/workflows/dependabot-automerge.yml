@@ -42,7 +42,7 @@ jobs:
           token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
           match_pattern: ${{ inputs.match_pattern != '' && inputs.match_pattern || 'test|discover|go' }}
           delay: ${{ inputs.wait-delay || 60 }}
-          interval: 10
+          interval: 60
           timeout: 600
   dependabot:
     needs: [wait_for_checks]
