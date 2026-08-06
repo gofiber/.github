@@ -47,7 +47,8 @@ cat > "$SANDBOX/bin/gh" <<'STUB'
 # records every call and answers the three reads the steps make
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$*" in
-  *"/comments --paginate"*) cat "$GH_ROWS" ;;
+  *"issues/"*"/comments --paginate"*) cat "$GH_ROWS" ;;
+  *"pulls/"*"/reviews --paginate"*) cat "$GH_REVIEWS" ;;
   *"issues/comments/"*"--jq .body"*) cat "$GH_BODY" ;;
   *"issues/comments/"*"--jq .node_id"*) echo "IC_node42" ;;
 esac
@@ -55,12 +56,15 @@ STUB
 chmod +x "$SANDBOX/bin/gh"
 PATH="$SANDBOX/bin:$PATH"
 
-export GH_LOG="$SANDBOX/gh.log" GH_ROWS="$SANDBOX/rows.tsv" GH_BODY="$SANDBOX/body.md"
+export GH_LOG="$SANDBOX/gh.log" GH_ROWS="$SANDBOX/rows.tsv" GH_BODY="$SANDBOX/body.md" \
+  GH_REVIEWS="$SANDBOX/reviews.txt"
 printf '%s\n\n%s\n' "$MARKER" "the old numbers" > "$GH_BODY"
 printf '%s\n' "the new numbers" > "$WORK/report.md"
 
-find_report() { # rows of "id<TAB>mine<TAB>any benchmark report", as the jq filter emits them
+# timestamps are fake but ordered, t1 < t2 < t3: everything here compares as strings
+find_report() { # rows of "id<TAB>posted<TAB>mine<TAB>any benchmark report", plus review stamps
   printf '%s\n' "$1" > "$GH_ROWS"
+  printf '%s\n' "${2-}" > "$GH_REVIEWS"
   : > "$GH_LOG"
   : > "$SANDBOX/outputs"
   (
@@ -83,18 +87,24 @@ post() { # SIGNIFICANT CHANGED POSTED BURIED [PR]
 }
 
 echo "--- finding the report already on the PR"
-check "no report yet" "id= buried=false " "$(find_report "1	false	false")"
+check "no report yet" "id= buried=false " "$(find_report "1	t1	false	false")"
 check "the newest own report wins" "id=9 buried=false " \
-  "$(find_report "$(printf '1\ttrue\ttrue\n9\ttrue\ttrue')")"
+  "$(find_report "$(printf '1\tt1\ttrue\ttrue\n9\tt2\ttrue\ttrue')")"
 check "a foreign comment buries it" "id=1 buried=true " \
-  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse')")"
+  "$(find_report "$(printf '1\tt1\ttrue\ttrue\n2\tt2\tfalse\tfalse')")"
 # storage posts one report per package, they must not bury each other every run
 check "a sibling module does not bury it" "id=1 buried=false " \
-  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\ttrue')")"
+  "$(find_report "$(printf '1\tt1\ttrue\ttrue\n2\tt2\tfalse\ttrue')")"
 check "chatter before the report does not count" "id=9 buried=false " \
-  "$(find_report "$(printf '1\tfalse\tfalse\n9\ttrue\ttrue')")"
+  "$(find_report "$(printf '1\tt1\tfalse\tfalse\n9\tt2\ttrue\ttrue')")"
 check "reposting resets the burial" "id=9 buried=false " \
-  "$(find_report "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse\n9\ttrue\ttrue')")"
+  "$(find_report "$(printf '1\tt1\ttrue\ttrue\n2\tt2\tfalse\tfalse\n9\tt3\ttrue\ttrue')")"
+# a review is a reply too, it just does not live in the issues endpoint
+check "a review buries it" "id=1 buried=true " "$(find_report "1	t1	true	true" "t2")"
+check "a review before the report does not" "id=1 buried=false " \
+  "$(find_report "1	t2	true	true" "t1")"
+check "the newest review decides" "id=1 buried=true " \
+  "$(find_report "1	t2	true	true" "$(printf 't1\nt3')")"
 
 echo "--- what lands on the PR"
 check "the first finding is posted" "POST repos/o/r/issues/7/comments;" "$(post true true '' false)"
@@ -135,19 +145,20 @@ check "refreshing in place hides nothing" "no" \
 echo "--- the jq filter that feeds all of this"
 if command -v jq > /dev/null 2>&1; then
   cat > "$SANDBOX/comments.json" <<'EOF'
-[{"id": 1, "body": "<!-- benchmark-report:. -->\n\nmine"},
- {"id": 2, "body": "looks good to me"},
- {"id": 3, "body": "<!-- benchmark-report:./middleware/redis -->\n\na sibling module"}]
+[{"id": 1, "created_at": "t1", "body": "<!-- benchmark-report:. -->\n\nmine"},
+ {"id": 2, "created_at": "t2", "body": "looks good to me"},
+ {"id": 3, "created_at": "t3", "body": "<!-- benchmark-report:./middleware/redis -->\n\na sibling module"}]
 EOF
-  check "flags mine, the siblings and the rest apart" "$(printf '1\ttrue\ttrue\n2\tfalse\tfalse\n3\tfalse\ttrue')" \
-    "$(jq -r ".[] | [.id, (.body | startswith(\"${MARKER}\") | tostring), (.body | startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv" \
+  check "flags mine, the siblings and the rest apart" "$(printf '1\tt1\ttrue\ttrue\n2\tt2\tfalse\tfalse\n3\tt3\tfalse\ttrue')" \
+    "$(jq -r ".[] | [.id, .created_at, (.body | startswith(\"${MARKER}\") | tostring), (.body | startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv" \
       "$SANDBOX/comments.json")"
 else
   echo "skip jq filter check, jq is not installed"
 fi
-# the filter above is a copy, so make sure the action still asks for the same three fields
+# the filter above is a copy, so make sure the action still asks for the same four fields
 check "the action still emits the same rows" "yes" \
-  "$(grep -qF 'startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv' "$ACTION" && echo yes || echo no)"
+  "$(grep -qF '[.id, .created_at, (.body' "$ACTION" \
+    && grep -qF 'startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv' "$ACTION" && echo yes || echo no)"
 
 echo
 if [ "$fails" -gt 0 ]; then

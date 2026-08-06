@@ -30,10 +30,10 @@ action is allowed to be loud exactly once per finding.
   crosses `alert-threshold` or `improve-threshold`.
 - **Refresh in place only while the report is the last comment.** Editing a comment
   sends no notification, so a report that is still the last word in the thread is
-  patched with the current numbers. Once someone replied below it, the report is
-  what that reply quoted and is never edited again: a new comment is posted instead,
-  but only once the findings actually changed (see below). A buried report whose
-  findings still hold is left untouched.
+  patched with the current numbers. Once someone replied below it, by comment or by
+  review, the report is what that reply quoted and is never edited again: a new
+  comment is posted instead, but only once the findings actually changed (see below).
+  A buried report whose findings still hold is left untouched.
 - **Superseded reports are hidden.** When a new comment is posted, the one it
   replaces is minimized as outdated (the GraphQL `minimizeComment` mutation with
   classifier `OUTDATED`): GitHub folds it away and labels it, its body and marker
