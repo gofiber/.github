@@ -30,11 +30,17 @@ type gitHub struct {
 	token        string
 	baseURL      string
 	httpc        *http.Client
-	backoffSpent time.Duration // total time slept on rate-limit backoff this run
+	backoffSpent time.Duration     // total time slept on rate-limit backoff this run
+	branches     map[string]string // org/repo -> default branch, filled by listOrgRepos
 }
 
 func newGitHub(token string) *gitHub {
-	return &gitHub{token: token, baseURL: apiBase, httpc: &http.Client{Timeout: 30 * time.Second}}
+	return &gitHub{
+		token:    token,
+		baseURL:  apiBase,
+		httpc:    &http.Client{Timeout: 30 * time.Second},
+		branches: map[string]string{},
+	}
 }
 
 func (g *gitHub) get(path string, query url.Values, out any) error {
@@ -162,13 +168,15 @@ type workflowInfo struct {
 	HTMLURL string `json:"html_url"`
 }
 
-// listOrgRepos returns the names of all public, non-archived repos of the org.
+// listOrgRepos returns the names of all public, non-archived repos of the org
+// and remembers their default branch, which the listing already carries.
 func (g *gitHub) listOrgRepos(org string) ([]string, error) {
 	var names []string
 	for page := 1; ; page++ {
 		var repos []struct {
-			Name     string `json:"name"`
-			Archived bool   `json:"archived"`
+			Name          string `json:"name"`
+			Archived      bool   `json:"archived"`
+			DefaultBranch string `json:"default_branch"`
 		}
 		q := url.Values{"type": {"public"}, "per_page": {"100"}, "page": {fmt.Sprint(page)}}
 		if err := g.get("/orgs/"+org+"/repos", q, &repos); err != nil {
@@ -177,6 +185,7 @@ func (g *gitHub) listOrgRepos(org string) ([]string, error) {
 		for _, r := range repos {
 			if !r.Archived {
 				names = append(names, r.Name)
+				g.branches[org+"/"+r.Name] = r.DefaultBranch
 			}
 		}
 		if len(repos) < 100 {
@@ -187,7 +196,12 @@ func (g *gitHub) listOrgRepos(org string) ([]string, error) {
 	return names, nil
 }
 
+// defaultBranch costs a request per repo per scan, so it reuses what the repo
+// listing already returned. Only an explicit `repos` config skips that listing.
 func (g *gitHub) defaultBranch(org, repo string) (string, error) {
+	if b := g.branches[org+"/"+repo]; b != "" {
+		return b, nil
+	}
 	var info struct {
 		DefaultBranch string `json:"default_branch"`
 	}
@@ -197,17 +211,34 @@ func (g *gitHub) defaultBranch(org, repo string) (string, error) {
 	return info.DefaultBranch, nil
 }
 
-// listRuns returns up to one page (100) of runs, newest first. The detection
-// windows are short enough that a single page always covers them.
-func (g *gitHub) listRuns(org, repo string, query url.Values) ([]workflowRun, error) {
-	query.Set("per_page", "100")
-	var out struct {
-		WorkflowRuns []workflowRun `json:"workflow_runs"`
+const maxRunPages = 3
+
+// listRuns returns runs newest first, paging until the oldest one is older than
+// notOlderThan. One page is not enough on busy repos: a dependabot batch merge
+// pushes 100 runs into a single hour, which would bury the previous green run a
+// failure has to be compared against. The caller's query is left untouched.
+func (g *gitHub) listRuns(org, repo string, query url.Values, notOlderThan time.Time) ([]workflowRun, error) {
+	const perPage = 100
+	q := url.Values{}
+	for k, v := range query {
+		q[k] = v
 	}
-	if err := g.get("/repos/"+org+"/"+repo+"/actions/runs", query, &out); err != nil {
-		return nil, err
+	q.Set("per_page", strconv.Itoa(perPage))
+	var all []workflowRun
+	for page := 1; page <= maxRunPages; page++ {
+		q.Set("page", strconv.Itoa(page))
+		var out struct {
+			WorkflowRuns []workflowRun `json:"workflow_runs"`
+		}
+		if err := g.get("/repos/"+org+"/"+repo+"/actions/runs", q, &out); err != nil {
+			return nil, err
+		}
+		all = append(all, out.WorkflowRuns...)
+		if len(out.WorkflowRuns) < perPage || !out.WorkflowRuns[len(out.WorkflowRuns)-1].CreatedAt.After(notOlderThan) {
+			break
+		}
 	}
-	return out.WorkflowRuns, nil
+	return all, nil
 }
 
 func (g *gitHub) listWorkflows(org, repo string) ([]workflowInfo, error) {

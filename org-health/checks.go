@@ -28,6 +28,7 @@ const (
 	checkPRBacklog        = "pr-backlog"
 	checkIssueBacklog     = "issue-backlog"
 	checkStalePRs         = "stale-prs"
+	checkStuckBotPRs      = "stuck-bot-prs"
 	checkUnansweredIssues = "unanswered-issues"
 	checkIssueSpike       = "issue-spike"
 )
@@ -39,18 +40,18 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 	if err != nil {
 		return nil, err
 	}
-	branchRuns, err := g.listRuns(org, repo, url.Values{"branch": {branch}})
+	branchRuns, err := g.listRuns(org, repo, url.Values{"branch": {branch}}, now.Add(-maxFailureAge))
 	if err != nil {
 		return nil, err
 	}
-	findings := detectBranchFailures(repo, branchRuns)
+	findings := detectBranchFailures(repo, branchRuns, now)
 
 	since := now.Add(-time.Duration(th.CrossPRWindowHours) * time.Hour)
 	prRuns, err := g.listRuns(org, repo, url.Values{
 		"event":   {"pull_request"},
 		"status":  {"failure"},
 		"created": {">=" + since.Format(time.RFC3339)},
-	})
+	}, since)
 	if err != nil {
 		return nil, err
 	}
@@ -64,6 +65,11 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 	return findings, nil
 }
 
+// A deleted or dormant workflow keeps its last red run as the latest one
+// forever, so without an age bound it re-fires every time its state entry
+// expires. utils/Modernize Lint was reported that way since 2026-05-25.
+const maxFailureAge = 7 * 24 * time.Hour
+
 // detectBranchFailures reports default-branch workflows whose latest completed
 // run failed or timed out while the run before it succeeded (edge-triggered: an
 // already-red workflow does not re-alert). A timeout is treated as a failure:
@@ -71,7 +77,7 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 // dependency, the same infra signal a hard failure is. A failure on the same
 // commit that was green before can only be the environment, never the code;
 // that distinction is surfaced as its own check.
-func detectBranchFailures(repo string, runs []workflowRun) []Finding {
+func detectBranchFailures(repo string, runs []workflowRun, now time.Time) []Finding {
 	byWorkflow := map[int64][]workflowRun{}
 	for _, r := range runs { // runs arrive newest first
 		if r.Status != "completed" {
@@ -81,6 +87,15 @@ func detectBranchFailures(repo string, runs []workflowRun) []Finding {
 		// named like the default branch shows up here. PR events are never
 		// default-branch signal.
 		if r.Event == "pull_request" || r.Event == "pull_request_target" {
+			continue
+		}
+		// GitHub's own managed jobs (dependabot updates, dependency graph,
+		// default-setup CodeQL) run as "dynamic". They are not the repo's CI:
+		// their failures are dependency problems, they report in their own tab,
+		// and their run name carries the updated directories, which makes an
+		// unreadable alert title. 6 of the green-to-red edges over 30 days came
+		// from them, 4 of those from one known npm pin in docs.
+		if r.Event == "dynamic" {
 			continue
 		}
 		// Cancelled/skipped runs carry no green/red signal; keeping them would
@@ -94,30 +109,55 @@ func detectBranchFailures(repo string, runs []workflowRun) []Finding {
 	var findings []Finding
 	for _, rs := range byWorkflow {
 		latest := rs[0]
+		if now.Sub(latest.CreatedAt) > maxFailureAge {
+			continue
+		}
 		switch latest.Conclusion {
 		case "failure", "timed_out":
-			if len(rs) < 2 || rs[1].Conclusion != "success" {
+			// Walk back over the failures to the run that broke the streak.
+			// Comparing only the newest two loses the transition whenever more
+			// than one run lands between two scans, which a batch merge does
+			// routinely: 59% of the green-to-red edges over 30 days were never
+			// the newest run at any poll.
+			i := 0
+			for i+1 < len(rs) && (rs[i+1].Conclusion == "failure" || rs[i+1].Conclusion == "timed_out") {
+				i++
+			}
+			if i+1 >= len(rs) || rs[i+1].Conclusion != "success" {
 				continue
 			}
-			prev := rs[1]
+			broke, prev := rs[i], rs[i+1]
+			// The streak, not the newest run, dates the incident: a workflow
+			// that has been red for weeks is not news, however fresh its last
+			// attempt is.
+			if now.Sub(broke.CreatedAt) > maxFailureAge {
+				continue
+			}
 			check := checkMasterFailure
-			detail := fmt.Sprintf("previous run on this branch was green (commit %.7s -> %.7s)", prev.HeadSHA, latest.HeadSHA)
-			if latest.HeadSHA == prev.HeadSHA {
+			detail := fmt.Sprintf("previous run on this branch was green (commit %.7s -> %.7s)", prev.HeadSHA, broke.HeadSHA)
+			if broke.HeadSHA == prev.HeadSHA {
 				check = checkSameSHAFlip
-				detail = fmt.Sprintf("commit %.7s was green and is red now with no code change, the environment broke", latest.HeadSHA)
-				if latest.Event == "schedule" {
+				detail = fmt.Sprintf("commit %.7s was green and is red now with no code change, the environment broke", broke.HeadSHA)
+				if broke.Event == "schedule" {
 					check = checkScheduledFailure
-					detail = fmt.Sprintf("scheduled run went red on commit %.7s with no new commits, the environment broke", latest.HeadSHA)
+					detail = fmt.Sprintf("scheduled run went red on commit %.7s with no new commits, the environment broke", broke.HeadSHA)
 				}
+			}
+			if i > 0 {
+				detail += fmt.Sprintf(", %d more failed since", i)
 			}
 			findings = append(findings, Finding{
 				Repo:     repo,
 				Check:    check,
-				Workflow: latest.Name,
-				Title:    fmt.Sprintf("%s: %s failed on %s", repo, latest.Name, latest.HeadBranch),
+				Workflow: broke.Name,
+				Title:    fmt.Sprintf("%s: %s failed on %s", repo, broke.Name, broke.HeadBranch),
 				Detail:   detail,
-				URL:      latest.HTMLURL,
-				Key:      fmt.Sprintf("%s/%s/%d/run-%d", repo, check, latest.WorkflowID, latest.ID),
+				URL:      broke.HTMLURL,
+				// Keyed by workflow alone, not by run and not by classification:
+				// both would hand a flapping workflow a fresh key on every flip
+				// and let it alert past its cooldown (storage Benchmark, 3x in 8h,
+				// and it alternates between push and schedule runs).
+				Key: fmt.Sprintf("%s/branch-failure/%d", repo, latest.WorkflowID),
 			})
 		case "startup_failure":
 			findings = append(findings, Finding{
@@ -213,6 +253,16 @@ func soleBotActor(actors map[string]bool) (string, bool) {
 	return "", false
 }
 
+// The line is auto-merged or not, not bot or human: dependency PRs merge
+// themselves within minutes and swing by ten per batch, which would drown the
+// review signal, so they get their own check. Anything else a bot opens
+// (copilot, renovate) waits for a human like any PR and stays review debt.
+// Repeated author: qualifiers are OR'd by the search API.
+const (
+	excludeAutoMerged = " -author:app/dependabot -author:app/github-actions"
+	onlyAutoMerged    = " author:app/dependabot author:app/github-actions"
+)
+
 // digestRepo runs the daily backlog and hygiene checks.
 func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, error) {
 	var findings []Finding
@@ -224,9 +274,10 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 	staleDate := now.AddDate(0, 0, -th.StalePRDays).Format("2006-01-02")
 	unansweredDate := now.AddDate(0, 0, -th.UnansweredIssueDays).Format("2006-01-02")
 	counts, err := g.searchCounts(map[string]string{
-		"openPRs":    "repo:" + full + " is:pr is:open",
+		"openPRs":    "repo:" + full + " is:pr is:open" + excludeAutoMerged,
 		"openIssues": "repo:" + full + " is:issue is:open",
-		"stale":      "repo:" + full + " is:pr is:open draft:false review:none created:<" + staleDate,
+		"stale":      "repo:" + full + " is:pr is:open draft:false review:none created:<" + staleDate + excludeAutoMerged,
+		"stuckBots":  "repo:" + full + " is:pr is:open draft:false created:<" + staleDate + onlyAutoMerged,
 		"unanswered": "repo:" + full + " is:issue is:open comments:0 created:<" + unansweredDate,
 		"lastDay":    "repo:" + full + " is:issue created:>=" + now.Add(-24*time.Hour).Format("2006-01-02T15:04:05Z"),
 		"twoWeeks":   "repo:" + full + " is:issue created:>=" + now.AddDate(0, 0, -14).Format("2006-01-02"),
@@ -237,6 +288,7 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 	openPRs := counts["openPRs"]
 	openIssues := counts["openIssues"]
 	stale := counts["stale"]
+	stuckBots := counts["stuckBots"]
 	unanswered := counts["unanswered"]
 	lastDay := counts["lastDay"]
 	twoWeeks := counts["twoWeeks"]
@@ -271,6 +323,20 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 			Detail: fmt.Sprintf("%d open PRs older than %d days with no review (threshold %d)", stale, th.StalePRDays, th.MaxStalePRs),
 			URL:    fmt.Sprintf("https://github.com/%s/pulls?q=is%%3Apr+is%%3Aopen+draft%%3Afalse+review%%3Anone", full),
 			Key:    repo + "/" + checkStalePRs,
+		})
+	}
+
+	if stuckBots > th.MaxStuckBotPRs {
+		findings = append(findings, Finding{
+			Repo:   repo,
+			Check:  checkStuckBotPRs,
+			Title:  fmt.Sprintf("%s: dependency PRs are not merging", repo),
+			Detail: fmt.Sprintf("%d bot PRs open for more than %d days (threshold %d), auto-merge holds back majors by design but the rest means its CI is red", stuckBots, th.StalePRDays, th.MaxStuckBotPRs),
+			// Same filters as the count, age included: a link that lists every
+			// open bot PR next to a number that only counts the old ones reads
+			// like the check miscounted.
+			URL: fmt.Sprintf("https://github.com/%s/pulls?q=is%%3Apr+is%%3Aopen+draft%%3Afalse+created%%3A%%3C%s+author%%3Aapp%%2Fdependabot+author%%3Aapp%%2Fgithub-actions", full, staleDate),
+			Key: repo + "/" + checkStuckBotPRs,
 		})
 	}
 

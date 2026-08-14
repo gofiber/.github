@@ -1,41 +1,34 @@
 {
   "org": "gofiber",
   "excludeRepos": [],
+  "_comment": "Thresholds calibrated 2026-08-14 against the live counts (human PRs only, bots are filtered out of the PR checks). Roughly double the steady state, so normal operation is silent and a real backlog is not.",
   "defaults": {
-    "maxOpenPRs": 25,
-    "maxOpenIssues": 60,
+    "maxOpenPRs": 10,
+    "maxOpenIssues": 25,
     "stalePRDays": 14,
-    "maxStalePRs": 5,
+    "maxStalePRs": 4,
+    "maxStuckBotPRs": 2,
     "unansweredIssueDays": 14,
-    "maxUnansweredIssues": 10,
+    "maxUnansweredIssues": 8,
     "crossPRMinPRs": 3,
     "crossPRWindowHours": 24,
     "issueSpikeFactor": 3.0,
-    "issueSpikeMinCount": 5,
+    "issueSpikeMinCount": 3,
     "cooldownHours": 72
   },
   "repoOverrides": {
     "fiber": {
-      "maxOpenPRs": 40,
-      "maxOpenIssues": 300,
-      "maxStalePRs": 15,
-      "maxUnansweredIssues": 30
+      "maxOpenPRs": 25,
+      "maxOpenIssues": 60,
+      "maxStalePRs": 8,
+      "maxUnansweredIssues": 15
     },
     "contrib": {
-      "maxOpenPRs": 30,
-      "maxOpenIssues": 100,
-      "maxStalePRs": 10,
-      "maxUnansweredIssues": 20
+      "maxOpenIssues": 40,
+      "maxUnansweredIssues": 15
     },
-    "storage": {
-      "maxOpenPRs": 30,
-      "maxOpenIssues": 100,
-      "maxStalePRs": 10,
-      "maxUnansweredIssues": 20
-    },
-    "recipes": {
-      "maxOpenIssues": 100,
-      "maxUnansweredIssues": 20
+    "template": {
+      "maxOpenIssues": 30
     }
   }
 }

@@ -1,14 +1,116 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// runsPage renders a workflow-runs response of count runs, all created age ago.
+func runsPage(count int, age time.Duration) string {
+	runs := make([]string, count)
+	for i := range runs {
+		runs[i] = fmt.Sprintf(`{"id":%d,"created_at":%q}`, i, testNow.Add(-age).Format(time.RFC3339))
+	}
+	return `{"workflow_runs":[` + strings.Join(runs, ",") + `]}`
+}
+
+// The repo listing already carries default_branch; asking again per repo cost
+// one request per repo per scan, 28% of the scan's REST traffic.
+func TestDefaultBranchReusesTheRepoListing(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if strings.HasSuffix(r.URL.Path, "/repos") {
+			io.WriteString(w, `[{"name":"storage","archived":false,"default_branch":"main"},{"name":"cli","archived":false,"default_branch":"master"}]`)
+			return
+		}
+		io.WriteString(w, `{"default_branch":"from-api"}`)
+	}))
+	defer srv.Close()
+
+	gh := newGitHub("")
+	gh.baseURL = srv.URL
+	if _, err := gh.listOrgRepos("gofiber"); err != nil {
+		t.Fatal(err)
+	}
+	for repo, want := range map[string]string{"storage": "main", "cli": "master"} {
+		got, err := gh.defaultBranch("gofiber", repo)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("%s: got branch %q, want %q", repo, got, want)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("%d requests, want 1: the branches must come from the listing", calls)
+	}
+	// A repo the listing never returned still has to work.
+	if got, err := gh.defaultBranch("gofiber", "private-one"); err != nil || got != "from-api" {
+		t.Fatalf("fallback broken: %q %v", got, err)
+	}
+	if calls != 2 {
+		t.Fatalf("%d requests, want 2 after the fallback", calls)
+	}
+}
+
+func TestListRunsPaginates(t *testing.T) {
+	body := runsPage
+	cutoff := testNow.Add(-24 * time.Hour)
+
+	cases := []struct {
+		name      string
+		page      func(p int) string
+		wantPages int
+		wantRuns  int
+	}{
+		{"stops once the window is covered", func(p int) string {
+			if p == 1 {
+				return body(100, time.Hour)
+			}
+			return body(100, 48*time.Hour)
+		}, 2, 200},
+		{"stops on a short page", func(int) string { return body(42, time.Hour) }, 1, 42},
+		{"honours the page cap", func(int) string { return body(100, time.Hour) }, maxRunPages, 100 * maxRunPages},
+		{"empty first page", func(int) string { return body(0, 0) }, 1, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var pages []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				q := r.URL.Query()
+				pages = append(pages, q.Get("page"))
+				p, _ := strconv.Atoi(q.Get("page"))
+				io.WriteString(w, tc.page(p))
+			}))
+			defer srv.Close()
+
+			gh := newGitHub("")
+			gh.baseURL = srv.URL
+			caller := url.Values{"branch": {"main"}}
+			got, err := gh.listRuns("gofiber", "fiber", caller, cutoff)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pages) != tc.wantPages {
+				t.Fatalf("requested pages %v, want %d", pages, tc.wantPages)
+			}
+			if len(got) != tc.wantRuns {
+				t.Fatalf("got %d runs, want %d", len(got), tc.wantRuns)
+			}
+			if caller.Has("page") || caller.Has("per_page") {
+				t.Fatalf("the caller's query must stay untouched: %v", caller)
+			}
+		})
+	}
+}
 
 // resetNow makes rateLimitWait floor its wait to the 1s minimum, keeping the
 // retry tests fast while still exercising the full backoff path.

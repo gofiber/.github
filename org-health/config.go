@@ -10,8 +10,9 @@ import (
 type Thresholds struct {
 	MaxOpenPRs          int     `json:"maxOpenPRs"`
 	MaxOpenIssues       int     `json:"maxOpenIssues"`
-	StalePRDays         int     `json:"stalePRDays"`
+	StalePRDays         int     `json:"stalePRDays"` // age bound for both the review-debt and the stuck-bot check
 	MaxStalePRs         int     `json:"maxStalePRs"`
+	MaxStuckBotPRs      int     `json:"maxStuckBotPRs"`
 	UnansweredIssueDays int     `json:"unansweredIssueDays"`
 	MaxUnansweredIssues int     `json:"maxUnansweredIssues"`
 	CrossPRMinPRs       int     `json:"crossPRMinPRs"`
@@ -79,6 +80,9 @@ func (c *Config) thresholds(repo string) Thresholds {
 	}
 	if o.MaxStalePRs > 0 {
 		t.MaxStalePRs = o.MaxStalePRs
+	}
+	if o.MaxStuckBotPRs > 0 {
+		t.MaxStuckBotPRs = o.MaxStuckBotPRs
 	}
 	if o.UnansweredIssueDays > 0 {
 		t.UnansweredIssueDays = o.UnansweredIssueDays
