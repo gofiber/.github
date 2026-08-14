@@ -639,7 +639,6 @@ jobs:
           published=0
           skipped=0
           failed=0
-          is_first_module=true
 
           process_module() {
             local name="$1"
@@ -656,14 +655,6 @@ jobs:
 
             # Record as processed
             echo "$draft_tag" >> "$RUNNER_TEMP/processed_tags.txt"
-
-            # Delay (skip before the very first module)
-            if [ "$is_first_module" = "true" ]; then
-              is_first_module=false
-            elif [ "$DRY_RUN" != "true" ] && [ "$DELAY_MINUTES" -gt 0 ]; then
-              echo "⏳ Waiting ${DELAY_MINUTES}m before \`$name\`..."
-              sleep "$((DELAY_MINUTES * 60))"
-            fi
 
             # Skip empty drafts
             if ! printf '%s' "$draft_body" | grep -qE '#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+'; then
@@ -745,6 +736,14 @@ jobs:
               echo "- ℹ️ \`$name\` (\`$draft_tag\`): low-only cooldown elapsed (${cd_weeks}w)" >> "$GITHUB_STEP_SUMMARY"
             fi
 
+            # Sits behind the skip guards on purpose: a module that never
+            # publishes has nothing for the registry to index, so waiting
+            # ahead of it is idle time. Only gaps between real publishes count.
+            if [ "$published" -gt 0 ] && [ "$DRY_RUN" != "true" ] && [ "$DELAY_MINUTES" -gt 0 ]; then
+              echo "⏳ Waiting ${DELAY_MINUTES}m before \`$name\`..."
+              sleep "$((DELAY_MINUTES * 60))"
+            fi
+
             # Publish (release notes are already cleaned in place by the
             # per-repo post-drafter cleanup workflow; this only flips
             # draft:false).
@@ -786,8 +785,9 @@ jobs:
             echo "  Wave $((wi+1))/$wave_count: $wave_name"
             echo "════════════════════════════════════════════"
 
-            # Wave delay (skip before the very first wave)
-            if [ "$wi" -gt 0 ] && [ "${WAVE_DELAY_MINUTES:-0}" -gt 0 ] && [ "$DRY_RUN" != "true" ]; then
+            # Wave delay (skip before the very first wave, and while nothing has
+            # been published: this wave would wait for a version that never shipped)
+            if [ "$wi" -gt 0 ] && [ "$published" -gt 0 ] && [ "${WAVE_DELAY_MINUTES:-0}" -gt 0 ] && [ "$DRY_RUN" != "true" ]; then
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "⏳ Wave delay: waiting ${WAVE_DELAY_MINUTES}m before wave $((wi+1)) ($wave_name)..."
               echo "⏳ Wave delay: waiting ${WAVE_DELAY_MINUTES}m before wave $((wi+1)) ($wave_name)..." >> "$GITHUB_STEP_SUMMARY"
