@@ -1,0 +1,53 @@
+name: pr-title-lint
+
+# The pull request title becomes the squash commit subject, so it is the only
+# place where the Conventional Commits format can be enforced for real.
+
+on:
+  workflow_call:
+    inputs:
+      types:
+        description: 'Allowed Conventional Commits types, pipe separated.'
+        required: false
+        type: string
+        default: 'build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: conventional title
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Check pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          TYPES: ${{ inputs.types }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          conventional="^(${TYPES})(\([a-zA-Z0-9 ,_./-]+\))?!?: .+"
+          # GitHub's revert button writes the title itself and cannot be talked
+          # out of it, so accept its shape as well.
+          revert='^Revert ".+"$'
+
+          if [[ "$TITLE" =~ $conventional || "$TITLE" =~ $revert ]]; then
+            echo "ok: $TITLE"
+            exit 0
+          fi
+
+          echo "::error title=Pull request title::'${TITLE}' is not a Conventional Commits subject"
+          {
+            echo "### Pull request title"
+            echo
+            echo "\`${TITLE}\`"
+            echo
+            echo "The title lands as the squash commit subject, so it has to read"
+            echo "\`type(scope): description\`, for example \`fix(cache): drop the stale entry\`."
+            echo
+            echo "Allowed types: ${TYPES//|/, }."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
