@@ -1,0 +1,127 @@
+name: issue-auto-reply
+
+# Two replies maintainers write over and over: "please add a reproducible
+# example" (driven by a label) and "please retry on the current release"
+# (driven by the version field of the bug report form).
+
+on:
+  workflow_call:
+    inputs:
+      replies-dir:
+        description: 'Directory holding one markdown file per label, named after the slugified label.'
+        required: false
+        type: string
+        default: '.github/issue-replies'
+      version-label:
+        description: 'Label of the issue-form field carrying the version. Empty disables the check.'
+        required: false
+        type: string
+        default: 'Fiber Version'
+    secrets:
+      github-token:
+        description: 'Token used to comment. Defaults to the caller GITHUB_TOKEN.'
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  labeled:
+    name: labeled reply
+    if: github.event.action == 'labeled'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Post the reply for this label
+        env:
+          GH_TOKEN: ${{ secrets.github-token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          LABEL: ${{ github.event.label.name }}
+          DIR: ${{ inputs.replies-dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Labels carry emoji and spaces; the file name is their ascii slug,
+          # so "🔍 Needs Reproduction" is answered by needs-reproduction.md.
+          slug=$(printf '%s' "$LABEL" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')
+          file="${DIR}/${slug}.md"
+
+          if [ ! -f "$file" ]; then
+            echo "no reply file for label '${LABEL}' (looked for ${file})"
+            exit 0
+          fi
+
+          # A label removed and added again must not repeat the same comment.
+          marker="<!-- auto-reply:${slug} -->"
+          if gh issue view "$ISSUE" --json comments --jq '.comments[].body' | grep -qF "$marker"; then
+            echo "reply for '${slug}' already posted"
+            exit 0
+          fi
+
+          { cat "$file"; echo; echo "$marker"; } > "$RUNNER_TEMP/reply.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/reply.md"
+
+  version:
+    name: version check
+    if: github.event.action == 'opened' && inputs.version-label != ''
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Compare the reported version with the newest release
+        env:
+          GH_TOKEN: ${{ secrets.github-token || github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          BODY: ${{ github.event.issue.body }}
+          FIELD: ${{ inputs.version-label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Issue forms render every field as "### <label>" followed by its value.
+          reported=$(printf '%s\n' "$BODY" \
+            | awk -v field="### ${FIELD}" '
+                $0 == field { grab = 1; next }
+                grab && /^### / { exit }
+                grab && NF { print; exit }
+              ' | tr -d '\r' | tr -d '[:space:]')
+          reported="${reported#v}"
+
+          # Anything that is not a plain semver ("latest", "master", a commit)
+          # cannot be compared, and guessing is worse than staying quiet.
+          if [[ ! "$reported" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "reported version '${reported}' is not comparable"
+            exit 0
+          fi
+
+          # Fiber maintains more than one major at a time, so the only fair
+          # comparison is against the newest release of the reported major.
+          major="${reported%%.*}"
+          newest=$(gh release list --limit 100 --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' \
+            | sed 's/^v//' \
+            | grep -E "^${major}\.[0-9]+\.[0-9]+$" \
+            | sort -V | tail -1 || true)
+
+          if [ -z "$newest" ] || [ "$newest" = "$reported" ]; then
+            echo "v${reported} is the newest release of v${major}"
+            exit 0
+          fi
+
+          if [ "$(printf '%s\n%s\n' "$reported" "$newest" | sort -V | tail -1)" = "$reported" ]; then
+            echo "v${reported} is ahead of the newest release v${newest}"
+            exit 0
+          fi
+
+          {
+            echo "Thanks for the report. It was filed against **v${reported}**, and **v${newest}** is the current release of that line. Could you check whether the problem still happens there? The fix may already be in."
+            echo
+            echo "<!-- auto-reply:version -->"
+          } > "$RUNNER_TEMP/version-reply.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/version-reply.md"
