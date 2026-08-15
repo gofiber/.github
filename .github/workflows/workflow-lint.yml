@@ -1,0 +1,35 @@
+name: workflow-lint
+
+# Reusable actionlint runner for the GitHub Actions workflows of a repo.
+# Callers need a .github/actionlint.yaml declaring the blacksmith runner labels,
+# otherwise every `runs-on: blacksmith-*` is reported as an unknown label.
+
+on:
+  workflow_call:
+    inputs:
+      actionlint-version:
+        description: 'actionlint version to use.'
+        required: false
+        type: string
+        default: '1.7.12'
+      flags:
+        description: 'Additional flags for actionlint (e.g. "-ignore <regex>").'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: ${{ inputs.actionlint-version }}
+          flags: ${{ inputs.flags }}

@@ -90,7 +90,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           # Build JSON array of all module paths
-          all=$(printf '%s\n' $modules | jq -Rsc 'split("\n") | map(select(length > 0))')
+          all=$(printf '%s\n' "$modules" | jq -Rsc 'split("\n") | map(select(length > 0))')
           echo "all=${all}" >> "$GITHUB_OUTPUT"
 
       # PRs use the REST file list, pushes diff against github.event.before - the

@@ -228,7 +228,7 @@ jobs:
             echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
-          # shellcheck disable=SC1091
+          # shellcheck source=/dev/null
           source "$GATE"
 
           classification=$(classify_draft_priority < "$RUNNER_TEMP/draft_body.md")
@@ -283,7 +283,7 @@ jobs:
             echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
-          # shellcheck disable=SC1091
+          # shellcheck source=/dev/null
           source "$GATE"
 
           prev=$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName // ""')
@@ -530,7 +530,7 @@ jobs:
           echo ""
 
           # ── Track processed draft tags ─────────────────────────────
-          > "$RUNNER_TEMP/processed_tags.txt"
+          : > "$RUNNER_TEMP/processed_tags.txt"
 
           # ── Helpers ────────────────────────────────────────────────
           find_draft() {
@@ -558,7 +558,8 @@ jobs:
           find_prev_for_tag() {
             local tag="$1"
             # Extract the prefix (everything before the last /vN.N.N segment)
-            local prefix=$(printf '%s' "$tag" | sed -E 's|(.*/)v[0-9].*|\1|')
+            local prefix
+            prefix=$(printf '%s' "$tag" | sed -E 's|(.*/)v[0-9].*|\1|')
             if [ "$prefix" = "$tag" ]; then prefix=""; fi
             find_prev "$prefix"
           }
@@ -572,7 +573,7 @@ jobs:
             echo "::error::release-gate.sh missing at ${GATE}. Central checkout (ref '${{ inputs.config-ref || 'main' }}') did not produce the scripts directory."
             exit 1
           fi
-          # shellcheck disable=SC1091
+          # shellcheck source=/dev/null
           source "$GATE"
 
           # ── run_hooks: execute post-release hooks for a module ────
@@ -800,7 +801,7 @@ jobs:
               # ── Auto-discover: release all drafts not yet processed ──
               if [ -s "$RUNNER_TEMP/processed_tags.txt" ]; then
                 processed=$(jq -R . "$RUNNER_TEMP/processed_tags.txt" | jq -s .)
-                remaining=$(printf '%s' "$all_drafts" | jq --argjson done "$processed" \
+                remaining=$(printf '%s' "$all_drafts" | jq --argjson 'done' "$processed" \
                   '[.[] | select(.tag_name as $t | $done | index($t) | not)] | sort_by(.tag_name)')
               else
                 remaining=$(printf '%s' "$all_drafts" | jq 'sort_by(.tag_name)')

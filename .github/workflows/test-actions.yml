@@ -8,8 +8,8 @@ on:
     paths:
       - '.github/actions/**'
       - '.github/scripts/**'
-      - '.github/workflows/benchmark.yml'
-      - '.github/workflows/test-actions.yml'
+      - '.github/actionlint.yaml'
+      - '.github/workflows/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -19,6 +19,9 @@ permissions:
   contents: read
 
 jobs:
+  workflows:
+    uses: ./.github/workflows/workflow-lint.yml
+
   # these had no runner until now, so they only ever ran on someone's laptop
   scripts:
     runs-on: blacksmith-2vcpu-ubuntu-2404

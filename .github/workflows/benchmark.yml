@@ -434,8 +434,10 @@ jobs:
             exit 1
           fi
           # sorted so the merged file is reproducible run to run
+          # shellcheck disable=SC2094 # inputs live under shards/, the target is the workspace root
           find shards -name output.txt | sort | xargs cat > output.txt
           # measured per-benchmark wall times, cached for the next run's plan job
+          # shellcheck disable=SC2094 # same, inputs are shards/*/timings.txt
           find shards -name timings.txt | sort | xargs -r cat > timings.txt
           if [[ ! -s output.txt ]]; then
             echo "::error::merged benchmark output is empty" >&2
