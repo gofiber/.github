@@ -269,8 +269,10 @@ jobs:
             fi
             (
               cd "$d"
+              # -v=false mutes testcontainers' container logs: go test folds them
+              # into stdout, where they split the benchmark result lines apart
               # shellcheck disable=SC2086 # GO_TEST_FLAGS is intentionally word-split
-              go test ./... -benchmem -run=^$ -bench . $GO_TEST_FLAGS
+              go test ./... -benchmem -run=^$ -bench . -v=false $GO_TEST_FLAGS
             ) | tee -a "$GITHUB_WORKSPACE/output.txt"
           done
 
@@ -283,7 +285,7 @@ jobs:
         run: |
           set -o pipefail
           # shellcheck disable=SC2086 # GO_TEST_FLAGS is intentionally word-split
-          go test ./... -benchmem -run=^$ -bench . $GO_TEST_FLAGS | tee "$GITHUB_WORKSPACE/output.txt"
+          go test ./... -benchmem -run=^$ -bench . -v=false $GO_TEST_FLAGS | tee "$GITHUB_WORKSPACE/output.txt"
 
       # One `go test` per package rather than a single run over ./...: benchmark names
       # are not unique across packages, so a shard's combined regex would match the
@@ -316,7 +318,7 @@ jobs:
           while read -r pkg pattern; do
             [ -n "$pkg" ] || continue
             # shellcheck disable=SC2086 # GO_TEST_FLAGS is intentionally word-split
-            go test -benchmem -run=^$ -bench "$pattern" $GO_TEST_FLAGS "$pkg" \
+            go test -benchmem -run=^$ -bench "$pattern" -v=false $GO_TEST_FLAGS "$pkg" \
               | python3 "$GITHUB_WORKSPACE/.central/.github/scripts/shard_benchmarks.py" \
                   record "$pkg" "$GITHUB_WORKSPACE/timings.txt" \
               | tee -a "$GITHUB_WORKSPACE/output.txt"

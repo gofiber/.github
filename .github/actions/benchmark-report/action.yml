@@ -302,11 +302,12 @@ runs:
             : > "$GITHUB_WORKSPACE/retest.txt"
             : > "$GITHUB_WORKSPACE/retest.log"
             # one plan line per module directory; -count=3 so the median decides,
-            # not whichever way the single re-measurement happens to wobble
+            # not whichever way the single re-measurement happens to wobble;
+            # -v=false keeps testcontainers' logs out of the parsed result lines
             while IFS=$'\t' read -r dir pkg_list; do
               # shellcheck disable=SC2086 # the package list is intentionally word-split
               (cd "${WORKING_DIRECTORY}/${dir}" && GOMAXPROCS="$procs" \
-                go test -run '^$' -bench "$regex" -benchmem -count=3 -timeout 15m $pkg_list) \
+                go test -run '^$' -bench "$regex" -benchmem -v=false -count=3 -timeout 15m $pkg_list) \
                 >> "$GITHUB_WORKSPACE/retest.txt" 2>> "$GITHUB_WORKSPACE/retest.log" || ok=false
             done < <(tail -n +2 retest-plan.txt)
             if [[ "$ok" == "true" ]]; then

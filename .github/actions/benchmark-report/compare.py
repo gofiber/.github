@@ -631,6 +631,13 @@ def main(argv=None):
     args = parser.parse_args(argv)
     improve_threshold = args.improve_threshold or args.threshold
 
+    with open(args.current, encoding="utf-8") as handle:
+        current, duplicates = parse(handle)
+    if not current:
+        # exit 1 is regressions, a broken run must not pass for a clean one
+        print(f"no benchmark results in {args.current}", file=sys.stderr)
+        return 2
+
     baseline_sha = args.baseline_sha
     if args.base:
         with open(args.base, encoding="utf-8") as handle:
@@ -641,8 +648,6 @@ def main(argv=None):
             # the action reads this marker and reports "comparison skipped"
             print("baseline=none")
             return 0
-    with open(args.current, encoding="utf-8") as handle:
-        current, duplicates = parse(handle)
     noise = read_history(args.history) if args.history else {}
     base = align_packages(base, current)
     noise = align_packages(noise, current)

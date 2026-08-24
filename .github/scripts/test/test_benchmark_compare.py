@@ -241,6 +241,30 @@ def test_main_without_any_baseline_prints_the_marker():
         assert "baseline=none" in out.getvalue(), out.getvalue()
 
 
+def test_main_rejects_a_run_whose_results_did_not_parse():
+    # testcontainers logs land between the benchmark name and its numbers, so
+    # neither half parses; exit 2, because 1 would read as "regressions found"
+    corrupted = (
+        "pkg: github.com/x/root\n"
+        "Benchmark_A-4\t2026/08/24 07:18:16 \U0001F433 Creating container\n"
+        "     888\t   1261660 ns/op\n"
+        "PASS\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        current = f"{tmp}/current.txt"
+        with open(current, "w", encoding="utf-8") as handle:
+            handle.write(corrupted)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = compare.main([
+                "--current", current, "--out", f"{tmp}/report.md",
+                "--baseline-cpu", "AMD EPYC", "--history", history_file(tmp),
+            ])
+        # checked before the baseline lookup, so a repo without history sees it too
+        assert code == 2, code
+        assert "no benchmark results" in err.getvalue(), err.getvalue()
+
+
 def test_main_compares_against_the_history_baseline():
     with tempfile.TemporaryDirectory() as tmp:
         current = f"{tmp}/current.txt"
