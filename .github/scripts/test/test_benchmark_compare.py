@@ -98,6 +98,24 @@ def test_parse_stitches_a_line_a_logger_split_apart():
     assert results[compare.Key("github.com/x/root", "Benchmark_A", "allocs/op")] == 361.0
 
 
+def test_parse_reads_a_line_a_logger_left_no_newline_in():
+    # without a trailing newline the noise never breaks the line, it sits inside
+    # it, and the previous benchmark's tail pushes in front of the name
+    results = parsed(
+        "pkg: github.com/x/root\n"
+        ".Benchmark_A-12    \t....    2000\t      7267 ns/op\t       1 B/op\n"
+    )
+    assert results[compare.Key("github.com/x/root", "Benchmark_A", "ns/op")] == 7267.0
+    assert results[compare.Key("github.com/x/root", "Benchmark_A", "B/op")] == 1.0
+
+
+def test_parse_does_not_invent_a_result_from_a_number_in_a_log_line():
+    # a whole "<iterations> <value> <unit>..." tail is required, so noise that
+    # merely mentions numbers stays noise
+    assert not parsed("pkg: x\nBenchmarkish log: retry 3 of 5 attempts failed\n")
+    assert not parsed("pkg: x\n2026/08/27 Benchmark_A took 12 seconds\n")
+
+
 def test_parse_does_not_stitch_across_a_package():
     # the orphan belongs to whatever ran next, and guessing would file it under
     # the wrong package
@@ -261,6 +279,26 @@ def test_main_without_any_baseline_prints_the_marker():
             ])
         assert code == 0
         assert "baseline=none" in out.getvalue(), out.getvalue()
+
+
+def test_a_benchmark_the_run_lost_is_annotated_and_flagged():
+    # only what both runs share reaches compare(), so a driver whose output
+    # partly failed to parse would otherwise drop results on a green job
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        _, report, _ = run(bench(Benchmark_A="100 ns/op", Benchmark_Gone="100 ns/op"),
+                           bench(Benchmark_A="100 ns/op"))
+    assert "::warning::" in err.getvalue(), err.getvalue()
+    assert "p Benchmark_Gone" in err.getvalue(), err.getvalue()
+    # and the report footer carries the flag next to the count
+    assert "1 gone ⚠️" in report, report
+
+
+def test_nothing_is_annotated_when_the_run_kept_every_benchmark():
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        run(bench(Benchmark_A="100 ns/op"), bench(Benchmark_A="110 ns/op", Benchmark_New="5 ns/op"))
+    assert "::warning::" not in err.getvalue(), err.getvalue()
 
 
 def test_main_rejects_a_run_whose_results_did_not_parse():

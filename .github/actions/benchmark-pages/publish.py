@@ -31,10 +31,55 @@ SPLIT_NAME_RE = re.compile(
     r'^(?P<name>Benchmark\w+[\w()$%^&*-=|,\[\]{}"#]*?)(?P<procs>-\d+)?[ \t]+\S'
 )
 ORPHAN_RE = re.compile(r"^[ \t]+\d+[ \t]+(?P<remainder>\S.*?)[ \t]*$")
+# without a trailing newline the same log does not split the line, it sits inside
+# it, and its tail can even push in front of the name
+NAME_ANYWHERE_RE = re.compile(
+    r'(?P<name>Benchmark\w+[\w()$%^&*-=|,\[\]{}"#]*?)(?:-\d+)?(?=[ \t])'
+)
 PKG_RE = re.compile(r"^pkg:\s+(?P<pkg>\S+)")
 # a bare name is one without the " - <unit>" suffix the extractor appends
 METRIC_SUFFIX_RE = re.compile(r" - [^ ]*/[^ ]*$")
 VERSION = 2
+
+
+def is_number(text):
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def salvage(line):
+    """(name, result tail) of a line a newline-less logger left its noise inside."""
+    found = NAME_ANYWHERE_RE.search(line)
+    if not found:
+        return None
+    tail = line[found.end():].split()
+    # the numbers start at the first iteration count leaving a whole
+    # "<value> <unit>..." behind, so noise merely naming a number invents nothing
+    for start, token in enumerate(tail):
+        rest = tail[start + 1:]
+        if token.isdigit() and rest and not len(rest) % 2 and all(map(is_number, rest[::2])):
+            return found.group("name"), " ".join(rest)
+    return None
+
+
+def read_result(line, pending):
+    """(name, result tail) of one `go test -bench` line, or None when it is not one.
+
+    A logger writing to stderr mid-benchmark lands between the name and the
+    numbers, because go test prints those in two writes. `pending` carries the
+    name from the first half of a line a newline-terminated log split in two.
+    """
+    match = LINE_RE.match(line)
+    if match:
+        return match.group("name"), match.group("remainder")
+    if pending:
+        orphan = ORPHAN_RE.match(line)
+        if orphan:
+            return pending, orphan.group("remainder")
+    return salvage(line)
 
 
 def contains_package_ref(name, pkg):
@@ -73,19 +118,15 @@ def extract(output, force_package_suffix):
         # the name of a benchmark whose numbers were pushed onto a later line
         pending = ""
         for line in lines:
-            match = LINE_RE.match(line)
-            if match:
-                name, pending = match.group("name"), ""
-            else:
+            found = read_result(line, pending)
+            if found is None:
                 split = SPLIT_NAME_RE.match(line)
                 if split:
                     pending = split.group("name")
-                    continue
-                match = ORPHAN_RE.match(line) if pending else None
-                if not match:
-                    continue
-                name, pending = pending, ""
-            pieces = re.split(r"[ \t]+", match.group("remainder"))
+                continue
+            name, remainder = found
+            pending = ""
+            pieces = re.split(r"[ \t]+", remainder)
             pairs = [(pieces[i * 2], pieces[i * 2 + 1]) for i in range(len(pieces) // 2)]
             if not pairs:
                 continue

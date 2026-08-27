@@ -30,6 +30,9 @@ BENCH_RE = re.compile(r"^(?P<name>Benchmark\S*?)(?:-\d+)?[ \t]+\d+[ \t]+(?P<rest
 # every response body it fails to close), so match the halves and stitch them.
 SPLIT_NAME_RE = re.compile(r"^(?P<name>Benchmark\S*?)(?:-\d+)?[ \t]+\S")
 ORPHAN_RE = re.compile(r"^[ \t]+\d+[ \t]+(?P<rest>\S.*?)[ \t]*$")
+# without a trailing newline the same log does not split the line, it sits inside
+# it, and its tail can even push in front of the name
+NAME_ANYWHERE_RE = re.compile(r"(?P<name>Benchmark\S*?)(?:-\d+)?(?=[ \t])")
 PKG_RE = re.compile(r"^pkg:[ \t]+(?P<pkg>\S+)")
 # \r?: GitHub rewrites a comment body to CRLF once anyone edits it in the web UI,
 # and a digest that stops matching would silently turn every run into "changed"
@@ -87,6 +90,46 @@ def bigger_is_better(unit):
     return unit.endswith("/s")
 
 
+def is_number(text):
+    try:
+        float(text)
+    except ValueError:
+        return False
+    return True
+
+
+def salvage(line):
+    """(name, result tail) of a line a newline-less logger left its noise inside."""
+    found = NAME_ANYWHERE_RE.search(line)
+    if not found:
+        return None
+    tail = line[found.end():].split()
+    # the numbers start at the first iteration count leaving a whole
+    # "<value> <unit>..." behind, so noise merely naming a number invents nothing
+    for start, token in enumerate(tail):
+        rest = tail[start + 1:]
+        if token.isdigit() and rest and not len(rest) % 2 and all(map(is_number, rest[::2])):
+            return found.group("name"), " ".join(rest)
+    return None
+
+
+def read_result(line, pending):
+    """(name, result tail) of one `go test -bench` line, or None when it is not one.
+
+    A logger writing to stderr mid-benchmark lands between the name and the
+    numbers, because go test prints those in two writes. `pending` carries the
+    name from the first half of a line a newline-terminated log split in two.
+    """
+    match = BENCH_RE.match(line)
+    if match:
+        return match.group("name"), match.group("rest")
+    if pending:
+        orphan = ORPHAN_RE.match(line)
+        if orphan:
+            return pending, orphan.group("rest")
+    return salvage(line)
+
+
 def parse_runs(stream):
     """Read benchmark output keeping every measurement, {(pkg, name, unit): [values]}."""
     results = {}
@@ -98,19 +141,15 @@ def parse_runs(stream):
         if header:
             pkg, pending = header.group("pkg"), ""
             continue
-        match = BENCH_RE.match(line)
-        if match:
-            name, pending = match.group("name"), ""
-        else:
+        found = read_result(line, pending)
+        if found is None:
             split = SPLIT_NAME_RE.match(line)
             if split:
                 pending = split.group("name")
-                continue
-            match = ORPHAN_RE.match(line) if pending else None
-            if not match:
-                continue
-            name, pending = pending, ""
-        fields = match.group("rest").split()
+            continue
+        name, rest = found
+        pending = ""
+        fields = rest.split()
         # "<name> <iterations> <value> <unit> [<value> <unit>...]", so an odd
         # tail means the line is not a benchmark result after all
         if len(fields) % 2:
@@ -122,6 +161,27 @@ def parse_runs(stream):
                 continue
             results.setdefault(Key(pkg, name, unit), []).append(number)
     return results
+
+
+def warn_vanished(base, current, limit=10):
+    """Annotate benchmarks the baseline has and this run does not.
+
+    compare() only looks at what both runs share, so a driver whose output only
+    partly parsed loses those results without a single red job. stderr, because
+    stdout is read back as the action's outputs.
+    """
+    def names(results):
+        return {f"{key.pkg} {key.name}" for key in results}
+
+    gone = sorted(names(base) - names(current))
+    if not gone:
+        return
+    listed = ", ".join(gone[:limit]) + (f", and {len(gone) - limit} more" if len(gone) > limit else "")
+    print(
+        f"::warning::{len(gone)} benchmark(s) in the baseline produced no result "
+        f"in this run: {listed}",
+        file=sys.stderr,
+    )
 
 
 def parse(stream):
@@ -668,6 +728,7 @@ def main(argv=None):
     noise = read_history(args.history) if args.history else {}
     base = align_packages(base, current)
     noise = align_packages(noise, current)
+    warn_vanished(base, current)
 
     worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns, noise)
 
@@ -787,7 +848,8 @@ def main(argv=None):
     added = len(current.keys() - base.keys())
     removed = len(base.keys() - current.keys())
     if added or removed:
-        notes.append(f"{added} new, {removed} gone")
+        # gone is where a partly unparsable run hides, so it carries the flag
+        notes.append(f"{added} new, {removed} gone" + (" ⚠️" if removed else ""))
     if duplicates:
         notes.append(f"⚠️ {duplicates} measured twice")
     if retest_note:

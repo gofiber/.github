@@ -133,6 +133,18 @@ def test_extract_stitches_a_line_a_logger_split_apart():
     assert values["Benchmark_DynamoDB_Set - allocs/op"] == 361.0, values
 
 
+def test_extract_reads_a_line_a_logger_left_no_newline_in():
+    # without a trailing newline the noise sits inside the line instead of
+    # breaking it, and the previous benchmark's tail pushes in front of the name
+    split = (
+        "pkg: github.com/gofiber/storage/dynamodb/v2\n"
+        ".Benchmark_DynamoDB_Set-2    \t....    2000\t   1355492 ns/op\t   31375 B/op\n"
+    )
+    values = {name: value for name, _, value in publish.extract(split, force_package_suffix=False)}
+    assert values["Benchmark_DynamoDB_Set - ns/op"] == 1355492.0, values
+    assert values["Benchmark_DynamoDB_Set - B/op"] == 31375.0, values
+
+
 def test_extract_only_suffixes_multi_package_output():
     single = "pkg: github.com/gofiber/storage/redis/v3\nBenchmark_Redis_Set-4\t10\t100 ns/op\t278 B/op\t9 allocs/op\n"
     names = [name for name, _, _ in publish.extract(single, force_package_suffix=False)]
