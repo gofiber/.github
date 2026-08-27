@@ -85,6 +85,28 @@ def test_parse_rejects_lines_with_an_odd_tail():
     assert not parsed("pkg: x\nBenchmarkBroken-4  100  58.00 ns/op  24\n")
 
 
+def test_parse_stitches_a_line_a_logger_split_apart():
+    # the AWS SDK warns on stderr mid-benchmark and go test folds that into
+    # stdout, between the name and the numbers
+    results = parsed(
+        "pkg: github.com/x/root\n"
+        "Benchmark_A-4            \tSDK 2026/08/27 08:26:18 WARN failed to close body\n"
+        "SDK 2026/08/27 08:26:20 WARN failed to close body\n"
+        "     742\t   1355492 ns/op\t   31375 B/op\t     361 allocs/op\n"
+    )
+    assert results[compare.Key("github.com/x/root", "Benchmark_A", "ns/op")] == 1355492.0
+    assert results[compare.Key("github.com/x/root", "Benchmark_A", "allocs/op")] == 361.0
+
+
+def test_parse_does_not_stitch_across_a_package():
+    # the orphan belongs to whatever ran next, and guessing would file it under
+    # the wrong package
+    assert not parsed(
+        "pkg: github.com/x/a\nBenchmark_A-4  \tlog line\npkg: github.com/x/b\n"
+        "     742\t   1355492 ns/op\n"
+    )
+
+
 def test_parse_counts_duplicates():
     doubled = OUTPUT + "Benchmark_NewError-4\t10\t99.00 ns/op\n"
     assert compare.parse(io.StringIO(doubled))[1] == 1
@@ -242,18 +264,13 @@ def test_main_without_any_baseline_prints_the_marker():
 
 
 def test_main_rejects_a_run_whose_results_did_not_parse():
-    # testcontainers logs land between the benchmark name and its numbers, so
-    # neither half parses; exit 2, because 1 would read as "regressions found"
-    corrupted = (
-        "pkg: github.com/x/root\n"
-        "Benchmark_A-4\t2026/08/24 07:18:16 \U0001F433 Creating container\n"
-        "     888\t   1261660 ns/op\n"
-        "PASS\n"
-    )
+    # a package that built and ran but measured nothing; exit 2, because 1 would
+    # read as "regressions found"
+    empty = "pkg: github.com/x/root\nPASS\nok  \tgithub.com/x/root\t0.5s\n"
     with tempfile.TemporaryDirectory() as tmp:
         current = f"{tmp}/current.txt"
         with open(current, "w", encoding="utf-8") as handle:
-            handle.write(corrupted)
+            handle.write(empty)
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             code = compare.main([

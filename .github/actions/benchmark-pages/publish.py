@@ -24,6 +24,13 @@ import time
 LINE_RE = re.compile(
     r'^(?P<name>Benchmark\w+[\w()$%^&*-=|,\[\]{}"#]*?)(?P<procs>-\d+)?\s+(?P<times>\d+)\s+(?P<remainder>.+)$'
 )
+# go test prints the name, runs the benchmark, then prints the numbers, so
+# anything the binary logs to stderr meanwhile splits that line in two. Same
+# name groups as above, so a stitched result is named like an intact one.
+SPLIT_NAME_RE = re.compile(
+    r'^(?P<name>Benchmark\w+[\w()$%^&*-=|,\[\]{}"#]*?)(?P<procs>-\d+)?[ \t]+\S'
+)
+ORPHAN_RE = re.compile(r"^[ \t]+\d+[ \t]+(?P<remainder>\S.*?)[ \t]*$")
 PKG_RE = re.compile(r"^pkg:\s+(?P<pkg>\S+)")
 # a bare name is one without the " - <unit>" suffix the extractor appends
 METRIC_SUFFIX_RE = re.compile(r" - [^ ]*/[^ ]*$")
@@ -63,15 +70,25 @@ def extract(output, force_package_suffix):
 
     results = []
     for pkg, lines in sections:
+        # the name of a benchmark whose numbers were pushed onto a later line
+        pending = ""
         for line in lines:
             match = LINE_RE.match(line)
-            if not match:
-                continue
+            if match:
+                name, pending = match.group("name"), ""
+            else:
+                split = SPLIT_NAME_RE.match(line)
+                if split:
+                    pending = split.group("name")
+                    continue
+                match = ORPHAN_RE.match(line) if pending else None
+                if not match:
+                    continue
+                name, pending = pending, ""
             pieces = re.split(r"[ \t]+", match.group("remainder"))
             pairs = [(pieces[i * 2], pieces[i * 2 + 1]) for i in range(len(pieces) // 2)]
             if not pairs:
                 continue
-            name = match.group("name")
             if multiple and pkg and (force_package_suffix or not contains_package_ref(name, pkg)):
                 name = f"{name} ({pkg})"
             for value, unit in pairs:

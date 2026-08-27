@@ -24,6 +24,12 @@ from collections import namedtuple
 # Non-greedy name so the trailing -GOMAXPROCS is split off even when the
 # benchmark name itself ends in -<digits> (subtests like Benchmark_X/n-8).
 BENCH_RE = re.compile(r"^(?P<name>Benchmark\S*?)(?:-\d+)?[ \t]+\d+[ \t]+(?P<rest>\S.*?)[ \t]*$")
+# go test prints the name, runs the benchmark, then prints the numbers, so
+# anything the binary writes to stderr meanwhile splits that line in two. -v=false
+# silences testcontainers but not a driver's own logger (the AWS SDK warns on
+# every response body it fails to close), so match the halves and stitch them.
+SPLIT_NAME_RE = re.compile(r"^(?P<name>Benchmark\S*?)(?:-\d+)?[ \t]+\S")
+ORPHAN_RE = re.compile(r"^[ \t]+\d+[ \t]+(?P<rest>\S.*?)[ \t]*$")
 PKG_RE = re.compile(r"^pkg:[ \t]+(?P<pkg>\S+)")
 # \r?: GitHub rewrites a comment body to CRLF once anyone edits it in the web UI,
 # and a digest that stops matching would silently turn every run into "changed"
@@ -85,14 +91,25 @@ def parse_runs(stream):
     """Read benchmark output keeping every measurement, {(pkg, name, unit): [values]}."""
     results = {}
     pkg = ""
+    # the name of a benchmark whose numbers were pushed onto a later line
+    pending = ""
     for line in stream:
         header = PKG_RE.match(line)
         if header:
-            pkg = header.group("pkg")
+            pkg, pending = header.group("pkg"), ""
             continue
         match = BENCH_RE.match(line)
-        if not match:
-            continue
+        if match:
+            name, pending = match.group("name"), ""
+        else:
+            split = SPLIT_NAME_RE.match(line)
+            if split:
+                pending = split.group("name")
+                continue
+            match = ORPHAN_RE.match(line) if pending else None
+            if not match:
+                continue
+            name, pending = pending, ""
         fields = match.group("rest").split()
         # "<name> <iterations> <value> <unit> [<value> <unit>...]", so an odd
         # tail means the line is not a benchmark result after all
@@ -103,7 +120,7 @@ def parse_runs(stream):
                 number = float(value)
             except ValueError:
                 continue
-            results.setdefault(Key(pkg, match.group("name"), unit), []).append(number)
+            results.setdefault(Key(pkg, name, unit), []).append(number)
     return results
 
 
