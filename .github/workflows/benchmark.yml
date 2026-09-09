@@ -6,7 +6,7 @@ on:
       go-version:
         description: Go version passed to actions/setup-go
         required: false
-        default: 1.25.x
+        default: 1.26.x
         type: string
       runs-on:
         description: >-

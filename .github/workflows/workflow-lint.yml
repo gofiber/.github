@@ -33,3 +33,55 @@ jobs:
         with:
           version: ${{ inputs.actionlint-version }}
           flags: ${{ inputs.flags }}
+
+      # wait-for-status-checks passes when match_pattern matches nothing, because
+      # [].every() is true, so a renamed job silently disables dependabot's merge gate.
+      - name: Check automerge match_pattern against real job names
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import yaml' 2>/dev/null || pip install --quiet pyyaml
+          python3 - <<'PY'
+          import glob, os, re, sys, yaml
+
+          WF = '.github/workflows'
+          DEFAULT = 'test|discover|go'  # keep in sync with dependabot-automerge.yml
+
+          def load(path):
+              try:
+                  doc = yaml.safe_load(open(path, encoding='utf-8'))
+                  return doc if isinstance(doc, dict) else {}
+              except Exception:
+                  return {}
+
+          pattern, found = None, False
+          for name in ('dependabot-automerge.yml', 'dependabot_automerge.yml'):
+              path = os.path.join(WF, name)
+              if os.path.exists(path):
+                  found = True
+                  for job in (load(path).get('jobs') or {}).values():
+                      if isinstance(job, dict) and 'automerge' in str(job.get('uses', '')):
+                          pattern = (job.get('with') or {}).get('match_pattern') or DEFAULT
+                  pattern = pattern or DEFAULT
+          if not found:
+              print('no dependabot automerge workflow, nothing to check')
+              sys.exit(0)
+
+          # A check run is named after the job's `name:`, or its key, and a job that
+          # calls a reusable workflow is prefixed onto the callee's own job name.
+          names = set()
+          for f in sorted(glob.glob(f'{WF}/*.yml') + glob.glob(f'{WF}/*.yaml')):
+              for key, job in (load(f).get('jobs') or {}).items():
+                  if not isinstance(job, dict):
+                      continue
+                  names.update({str(key), str(job.get('name') or key)})
+                  if job.get('uses'):
+                      names.add(f'{key} / ')
+
+          dead = [a for a in pattern.split('|') if not any(re.search(a, n) for n in names)]
+          if dead:
+              print(f'::error::match_pattern {pattern!r} has alternatives that match no job '
+                    f'in this repo: {dead}. Dependabot would merge without waiting for them.')
+              sys.exit(1)
+          print(f'match_pattern {pattern!r}: every alternative matches a job')
+          PY

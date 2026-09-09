@@ -6,7 +6,7 @@ on:
       go-versions:
         description: JSON array of Go versions for the test matrix
         required: false
-        default: '["1.25.x"]'
+        default: '["1.26.x", "1.27.x"]'
         type: string
       platforms:
         description: JSON array of platforms to test against
