@@ -1,0 +1,39 @@
+name: pr-command-hint
+
+# Posts one small comment on a newly opened pull request naming the slash commands
+# pr-command.yml offers there. pull_request_target, so it can comment on forks as
+# well: it checks out nothing and puts no pull request data into a script, so the
+# write token never meets pull request content.
+
+on:
+  workflow_call:
+    inputs:
+      hint:
+        description: 'One line on what the commands do, e.g. "`/generate` re-runs the code generators on this branch".'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  hint:
+    # Bots open dependency bumps, which none of the commands are for.
+    if: >-
+      github.event.pull_request
+      && github.event.action == 'opened'
+      && github.event.pull_request.user.type != 'Bot'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HINT: ${{ inputs.hint }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body "<sub>🤖 Maintainers: $HINT</sub>"

@@ -63,13 +63,22 @@ name: PR Commands
 on:
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [opened]
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
+  hint:
+    if: github.event_name == 'pull_request_target'
+    uses: gofiber/.github/.github/workflows/pr-command-hint.yml@main
+    with:
+      hint: '`/tidy` runs go mod tidy on this branch'
+
   tidy:
+    if: github.event_name == 'issue_comment'
     # One group per command and pull request, so a second /tidy waits instead of
     # racing the first one's push.
     concurrency:
@@ -88,6 +97,7 @@ jobs:
 - The command has to sit on a line of its own in the conversation tab, a review thread is not an `issue_comment`, and the commenter needs `write`, `maintain` or `admin` on the repository. Every run a maintainer starts answers with one comment; a comment from someone without write access only gets a reaction.
 - The words after the command reach `$ARGS` only if they are made of `[A-Za-z0-9._,=:/+ -]`; anything else is refused with a comment naming the reason.
 - `issue_comment` always runs the copy of the workflow on the default branch, so a caller cannot be tried out from the pull request that adds it: merge it first.
+- `pr-command-hint.yml` (the `hint` job above) posts one small comment on every pull request a person opens, naming the commands. It sits apart from `pr-command.yml` so a repository with several commands still gets a single comment.
 - In use: `gofiber/utils` for `/bench-readme` and `/bench-readme-amd64`, `gofiber/fiber` for `/generate`.
 
 ## Shared configuration
