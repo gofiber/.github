@@ -1,0 +1,418 @@
+name: pr-command
+
+# Runs a repository command when a maintainer types a slash command on a pull
+# request, then pushes whatever the command changed back onto the PR branch.
+#
+# issue_comment always runs the default branch's copy of the workflow with a
+# write-capable token, so the pull request code this executes and that token
+# never share a job: `run` gets a read-only token and no git credentials, and
+# `push` runs nothing from the pull request and re-checks, with the token in
+# hand, that the patch stays inside the paths the caller allowed.
+#
+# The head sha is resolved when the comment arrives, so what runs is whatever is
+# on the branch then, not what the maintainer read before typing the command.
+#
+# The separation does not cover the Actions cache: issue_comment runs on the
+# default branch ref, so `run` could write one every other workflow restores from.
+# setup-go's cache is off here, the rest is up to what the command does.
+#
+# A caller triggers on issue_comment and needs:
+#   permissions:
+#     contents: write
+#     pull-requests: write
+
+on:
+  workflow_call:
+    inputs:
+      command:
+        description: 'Slash command to react to, without the leading slash (e.g. "generate").'
+        required: true
+        type: string
+      run:
+        description: >-
+          Script executed on the pull request head. The words typed after the command
+          are in $ARGS. Read event data from `env:` inside the script, never by
+          interpolating it into this input: it is expanded in the caller's context.
+        required: true
+        type: string
+      commit-message:
+        description: Commit subject for the changes the script produced. Empty names the command.
+        required: false
+        default: ''
+        type: string
+      paths:
+        description: >-
+          Space separated git pathspecs the command may change. What it touches
+          outside them stays out of the commit, and the pushing job refuses a patch
+          that reaches past them anyway, because that job is the one with the token.
+        required: false
+        default: '.'
+        type: string
+      runs-on:
+        description: Runner label for the job that executes the command.
+        required: false
+        default: ubuntu-latest
+        type: string
+      go-version:
+        description: >-
+          Go version for actions/setup-go. Empty takes the version from go.mod,
+          "none" skips the Go setup entirely.
+        required: false
+        default: ''
+        type: string
+      timeout-minutes:
+        description: Timeout for the job that executes the command.
+        required: false
+        default: 30
+        type: number
+    secrets:
+      push-token:
+        description: >-
+          PAT with write access to the pull request head. Needed to push to a fork
+          branch, which GITHUB_TOKEN cannot do, and the only way the pushed commit
+          starts the repository's own checks. Without it a fork run reports the
+          patch as a run artifact instead of pushing it.
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # contains() also fires on "/generate-all" or on a quoted comment. It only keeps
+    # the command runner cold for unrelated comments; the exact match happens below.
+    # Excluding bots keeps this workflow's own result comment from starting a job.
+    if: >-
+      github.event.issue.pull_request
+      && github.event.comment.user.type != 'Bot'
+      && contains(github.event.comment.body, format('/{0}', inputs.command))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    outputs:
+      match: ${{ steps.parse.outputs.match }}
+      args: ${{ steps.parse.outputs.args }}
+      head-repo: ${{ steps.parse.outputs.head-repo }}
+      head-ref: ${{ steps.parse.outputs.head-ref }}
+      head-sha: ${{ steps.parse.outputs.head-sha }}
+      fork: ${{ steps.parse.outputs.fork }}
+    steps:
+      - name: Parse command
+        id: parse
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ACTOR: ${{ github.event.comment.user.login }}
+          COMMAND: ${{ inputs.command }}
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+
+          # The command goes into a regex below, so keep it to what a slash command is.
+          if ! printf '%s' "$COMMAND" | grep -qE '^[a-z0-9][a-z0-9-]*$'; then
+            echo "::error::command input must be lowercase alphanumeric with dashes, got '$COMMAND'"
+            exit 1
+          fi
+          # An empty pathspec list matches everything, which would void the re-check
+          # the push job does before it commits.
+          if [ -z "$PATHS" ]; then
+            echo "::error::the paths input is empty, which would let the command commit anything"
+            exit 1
+          fi
+
+          react() {
+            gh api --silent --method POST "/repos/$REPO/issues/comments/$COMMENT_ID/reactions" -f content="$1" || true
+          }
+          ignore() { # $1 reason, for someone who may not run commands here
+            react confused
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::/$COMMAND ignored: $1"
+            exit 0
+          }
+          refuse() { # $1 reason, for a maintainer whose command was understood but not run
+            react confused
+            gh pr comment "$PR" --repo "$REPO" --body "⚠️ \`/$COMMAND\` was not run: $1"
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          # The command must own a line: "/cmd" or "/cmd <args>". That keeps quoted
+          # comments and longer commands sharing the prefix from triggering this one.
+          line=$(printf '%s\n' "$COMMENT_BODY" | tr -d '\r' | grep -m1 -E "^[[:space:]]*/${COMMAND}([[:space:]]|\$)" || true)
+          if [ -z "$line" ]; then
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            echo "no /$COMMAND command in this comment"
+            exit 0
+          fi
+
+          # Not author_association: that reads COLLABORATOR for read and triage access
+          # as well, and MEMBER for every member of the org.
+          if ! perm=$(gh api "/repos/$REPO/collaborators/$ACTOR/permission" --jq '.permission'); then
+            # An outage, not a verdict: refusing quietly would take every command down.
+            echo "::error::cannot read $ACTOR's permission on $REPO, see the gh output above"
+            exit 1
+          fi
+          case "$perm" in
+            admin | maintain | write) ;;
+            *) ignore "$ACTOR's permission on $REPO is '$perm', needs write, maintain or admin" ;;
+          esac
+
+          # These words end up on a command line. A comment carrying anything else is
+          # a typo at best, so refuse it rather than silently run a different command.
+          args=$(printf '%s' "${line#*"/$COMMAND"}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          # printf adds the newline grep needs to see the empty case as a line at all.
+          if ! printf '%s\n' "$args" | grep -qE '^[A-Za-z0-9._,=:/+ -]*$'; then
+            refuse "the arguments contain characters a flag cannot have"
+          fi
+
+          react eyes
+
+          pr=$(gh api "/repos/$REPO/pulls/$PR")
+          head_repo=$(printf '%s' "$pr" | jq -r '.head.repo.full_name // ""')
+          head_ref=$(printf '%s' "$pr" | jq -r '.head.ref // ""')
+          head_sha=$(printf '%s' "$pr" | jq -r '.head.sha // ""')
+          if [ -z "$head_repo" ] || [ -z "$head_ref" ] || [ -z "$head_sha" ]; then
+            echo "::error::pull request $PR has no head branch left to run against"
+            exit 1
+          fi
+
+          fork=true
+          [ "$head_repo" != "$REPO" ] || fork=false
+
+          {
+            echo "match=true"
+            echo "args=$args"
+            echo "head-repo=$head_repo"
+            echo "head-ref=$head_ref"
+            echo "head-sha=$head_sha"
+            echo "fork=$fork"
+          } >> "$GITHUB_OUTPUT"
+          echo "/$COMMAND $args on $head_repo@$head_ref ($head_sha)"
+
+  run:
+    needs: check
+    if: needs.check.outputs.match == 'true'
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Read-only, and the checkout below keeps no credentials: whatever the pull
+    # request code does with this job, it cannot write to the repository.
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.check.outputs.head-repo }}
+          ref: ${{ needs.check.outputs.head-sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: inputs.go-version != 'none'
+        with:
+          go-version: ${{ inputs.go-version }}
+          go-version-file: go.mod
+          # issue_comment runs on the default branch ref, so a cache written here
+          # lands in the scope every other workflow of the repo restores from.
+          cache: false
+
+      - name: /${{ inputs.command }}
+        shell: bash
+        env:
+          ARGS: ${{ needs.check.outputs.args }}
+        run: ${{ inputs.run }}
+
+      - name: Collect changes
+        id: diff
+        shell: bash
+        env:
+          PATHS: ${{ inputs.paths }}
+        run: |
+          set -euo pipefail
+          set -f # PATHS is a pathspec list for git, not a glob for the shell
+
+          # -N without a pathspec: it only has to make the files the command created
+          # visible to the diff, and `git add` errors on a pathspec matching nothing.
+          git add --intent-to-add --all
+          # Against HEAD, not the index: `git add --all` already staged the deletions,
+          # and a plain `git diff` would leave them out of the patch.
+          # shellcheck disable=SC2086 # PATHS is a caller-provided pathspec list
+          git diff HEAD --binary -- $PATHS > "$RUNNER_TEMP/pr-command.patch"
+          if [ ! -s "$RUNNER_TEMP/pr-command.patch" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "no changes" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          {
+            echo '```'
+            # shellcheck disable=SC2086 # PATHS is a caller-provided pathspec list
+            git diff HEAD --stat -- $PATHS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.diff.outputs.changed == 'true'
+        with:
+          name: pr-command-${{ inputs.command }}-patch
+          path: ${{ runner.temp }}/pr-command.patch
+          if-no-files-found: error
+          retention-days: 7
+
+  push:
+    needs: [check, run]
+    if: needs.run.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+      sha: ${{ steps.push.outputs.sha }}
+      reason: ${{ steps.push.outputs.reason }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.check.outputs.head-repo }}
+          ref: ${{ needs.check.outputs.head-sha }}
+          token: ${{ secrets.push-token || github.token }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: pr-command-${{ inputs.command }}-patch
+          path: ${{ runner.temp }}
+
+      - name: Commit and push
+        id: push
+        shell: bash
+        env:
+          COMMAND: ${{ inputs.command }}
+          MESSAGE: ${{ inputs.commit-message }}
+          PATHS: ${{ inputs.paths }}
+          HEAD_REPO: ${{ needs.check.outputs.head-repo }}
+          HEAD_REF: ${{ needs.check.outputs.head-ref }}
+          FORK: ${{ needs.check.outputs.fork }}
+          HAS_TOKEN: ${{ secrets.push-token != '' }}
+        run: |
+          set -euo pipefail
+          set -f # PATHS is a pathspec list for git, not a glob for the shell
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # For every git command below, the push included: the patch is the output of
+          # pull request code, and so is the tree it is applied to.
+          git config core.hooksPath /dev/null
+
+          if ! git apply --index "$RUNNER_TEMP/pr-command.patch"; then
+            printf 'pushed=false\nreason=apply\n' >> "$GITHUB_OUTPUT"
+            echo "::error::the patch does not apply to $HEAD_REPO:$HEAD_REF"
+            exit 1
+          fi
+
+          # The job that built the patch also ran the pull request's code, so its own
+          # pathspec filter proves nothing. Re-check it here, where the token is.
+          # --no-renames: rename detection prints only the destination, so a rename
+          # from outside PATHS into it would match on both sides and slip through.
+          staged=$(git diff --cached --name-only --no-renames)
+          if [ -z "$staged" ]; then
+            printf 'pushed=false\nreason=empty\n' >> "$GITHUB_OUTPUT"
+            echo "::error::the patch applied but staged nothing, there is no commit to push"
+            exit 1
+          fi
+          # shellcheck disable=SC2086 # PATHS is a caller-provided pathspec list
+          allowed=$(git diff --cached --name-only --no-renames -- $PATHS)
+          # Both lists come from variables, so a failing git aborts the step instead of
+          # feeding comm an empty side and letting the check pass.
+          outside=$(comm -23 <(sort <<< "$staged") <(sort <<< "$allowed"))
+          if [ -n "$outside" ]; then
+            printf 'pushed=false\nreason=paths\n' >> "$GITHUB_OUTPUT"
+            echo "::error::/$COMMAND changed files outside its allowed paths ($PATHS):"
+            printf '%s\n' "$outside"
+            exit 1
+          fi
+
+          git commit -m "${MESSAGE:-chore(ci): apply /$COMMAND}"
+
+          # HEAD is the head sha the command ran on, so a branch that moved in the
+          # meantime rejects this push instead of dropping the newer commits.
+          if output=$(git push origin "HEAD:refs/heads/$HEAD_REF" 2>&1); then
+            {
+              echo "pushed=true"
+              echo "sha=$(git rev-parse --short HEAD)"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'pushed=false\nreason=push\n' >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$output"
+          if [ "$FORK" = "true" ] && [ "$HAS_TOKEN" != "true" ]; then
+            # The documented limit, not a failure: GITHUB_TOKEN cannot reach a fork.
+            echo "::warning::$HEAD_REPO is a fork and no push-token secret is set, so the patch only stays on this run"
+            exit 0
+          fi
+          echo "::error::cannot push to $HEAD_REPO:$HEAD_REF, see the git output above"
+          exit 1
+
+  report:
+    needs: [check, run, push]
+    # Not always(): a cancelled run would report itself as a failed command.
+    if: ${{ !cancelled() && (needs.check.outputs.match == 'true' || needs.check.result == 'failure') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment result
+        id: comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          COMMAND: ${{ inputs.command }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          RESULT: ${{ needs.run.result }}
+          CHANGED: ${{ needs.run.outputs.changed }}
+          PUSHED: ${{ needs.push.outputs.pushed }}
+          SHA: ${{ needs.push.outputs.sha }}
+          REASON: ${{ needs.push.outputs.reason }}
+          HEAD_REF: ${{ needs.check.outputs.head-ref }}
+          FORK: ${{ needs.check.outputs.fork }}
+          HAS_TOKEN: ${{ secrets.push-token != '' }}
+        run: |
+          set -euo pipefail
+          log="[Run log]($RUN_URL)"
+          # A branch name may carry backticks and brackets, which would break out of
+          # the code span below and render as markdown in a comment from the bot.
+          ref=$(printf '%s' "$HEAD_REF" | tr -d '`[]()')
+
+          if [ "$CHECK_RESULT" != "success" ]; then
+            body="❌ \`/$COMMAND\` could not start. $log"
+          elif [ "$RESULT" != "success" ]; then
+            body="❌ \`/$COMMAND\` failed. $log"
+          elif [ "$CHANGED" != "true" ]; then
+            body="✅ \`/$COMMAND\` ran, nothing changed. $log"
+          elif [ "$PUSHED" = "true" ]; then
+            body="✅ \`/$COMMAND\` pushed \`$SHA\` to \`$ref\`. $log"
+            if [ "$HAS_TOKEN" != "true" ]; then
+              body="$body"$'\n\n'"A commit pushed with \`GITHUB_TOKEN\` starts no workflow run, so the checks still show the commit before it. Re-run them or push again."
+            fi
+          elif [ "$REASON" = "push" ]; then
+            # The only state where the patch passed the paths check, so the only one
+            # where handing it to a human does not walk around that check.
+            body="⚠️ \`/$COMMAND\` produced changes but could not push them to \`$ref\`. Download the \`pr-command-$COMMAND-patch\` artifact from the $log and apply it with \`git apply\`."
+            if [ "$FORK" = "true" ] && [ "$HAS_TOKEN" != "true" ]; then
+              body="$body Pushing to a fork branch needs the \`push-token\` secret."
+            fi
+          elif [ "$REASON" = "paths" ]; then
+            body="❌ \`/$COMMAND\` changed files outside the paths it is allowed to touch, so nothing was pushed. $log"
+          else
+            body="❌ \`/$COMMAND\` produced changes but they were not committed. $log"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body "$body"

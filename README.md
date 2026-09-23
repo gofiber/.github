@@ -54,6 +54,42 @@ Pushes documentation (or any directory) from the caller repository to another re
 - Inputs: `source-path`, `destination-repo`, optional `destination-branch`, `destination-path`, `commit-message`, `git-user-name`, `git-user-email`.
 - Secrets: `destination-token` with push access to the destination repository.
 
+### pr-command
+Runs a repository command when a maintainer comments a slash command on a pull request, then pushes whatever the command changed back onto the PR branch. Only the command and the script belong to the caller; the comment parsing, the permission gate, the reactions, the commit and the result comment live here. Unlike the other workflows in this repository a caller brings its own `on:`, `concurrency:` and `permissions:`, and is called `pr-commands.yml` because one caller can host several commands:
+
+```yaml
+name: PR Commands
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  tidy:
+    # One group per command and pull request, so a second /tidy waits instead of
+    # racing the first one's push.
+    concurrency:
+      group: ${{ github.workflow }}-tidy-${{ github.event.issue.number }}
+      cancel-in-progress: false
+    uses: gofiber/.github/.github/workflows/pr-command.yml@main
+    with:
+      command: tidy
+      paths: go.mod go.sum
+      commit-message: 'chore: go mod tidy'
+      run: go mod tidy
+```
+
+- Inputs: `command` (the slash command without the slash), `run` (the script executed on the pull request head, with the words typed after the command in `$ARGS`), `commit-message`, `paths` (space separated pathspecs the command may change, default `.`), `runs-on` (default `ubuntu-latest`), `go-version` (empty takes it from `go.mod`, `none` skips the Go setup), `timeout-minutes` (default `30`).
+- Secrets: optional `push-token`, a PAT with write access to the pull request head (`gofiber/utils` and `gofiber/fiber` pass the org's `PR_TOKEN`). Without it a fork branch cannot be pushed to and the patch is attached to the run instead, and because a push made with `GITHUB_TOKEN` creates no workflow run, the repository's checks keep showing the commit before it. Only the pushing job sees the PAT, and that job runs nothing from the pull request.
+- The command has to sit on a line of its own in the conversation tab, a review thread is not an `issue_comment`, and the commenter needs `write`, `maintain` or `admin` on the repository. Every run a maintainer starts answers with one comment; a comment from someone without write access only gets a reaction.
+- The words after the command reach `$ARGS` only if they are made of `[A-Za-z0-9._,=:/+ -]`; anything else is refused with a comment naming the reason.
+- `issue_comment` always runs the copy of the workflow on the default branch, so a caller cannot be tried out from the pull request that adds it: merge it first.
+- In use: `gofiber/utils` for `/bench-readme` and `/bench-readme-amd64`, `gofiber/fiber` for `/generate`.
+
 ## Shared configuration
 
 This repository also stores configuration that should remain identical across gofiber projects:
