@@ -250,7 +250,7 @@ collect tracked.txt
 check "only the listed path is collected" "diff --git a/tracked.txt b/tracked.txt" \
   "$(grep '^diff --git' "$RUNNER_TEMP/pr-command.patch")"
 
-# The shape gofiber/fiber ships: several globs, matched recursively by git alone.
+# Several globs, matched recursively by git alone and left untouched by the shell.
 setup_repo
 mkdir -p "$WORK/middleware/cache"
 printf 'gen\n' > "$WORK/root_msgp.go"
