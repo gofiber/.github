@@ -1,9 +1,9 @@
 name: pr-command-hint
 
-# Posts one small comment on a newly opened pull request naming the slash commands
-# pr-command.yml offers there. pull_request_target, so it can comment on forks as
-# well: it checks out nothing and puts no pull request data into a script, so the
-# write token never meets pull request content.
+# Appends one small line to the description of a newly opened pull request naming
+# the slash commands pr-command.yml offers there. pull_request_target, so it can
+# edit forks' pull requests as well: it checks out nothing and handles the
+# description only as data, so the write token never runs pull request content.
 
 on:
   workflow_call:
@@ -28,7 +28,8 @@ jobs:
     permissions:
       pull-requests: write
     steps:
-      - name: Comment
+      - name: Append to the description
+        id: append
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -36,4 +37,13 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           HINT: ${{ inputs.hint }}
         run: |
-          gh pr comment "$PR" --repo "$REPO" --body "<sub>🤖 Maintainers: $HINT</sub>"
+          set -euo pipefail
+          marker='<!-- pr-command-hint -->'
+
+          # Fetched now, not taken from the event: the author may have edited the
+          # description since opening, and writing back that copy would undo it.
+          body=$(gh pr view "$PR" --repo "$REPO" --json body --jq '.body // ""')
+          case "$body" in *"$marker"*) exit 0 ;; esac
+
+          printf '%s\n\n%s\n<sub>🤖 Maintainers: %s</sub>\n' "$body" "$marker" "$HINT" > "$RUNNER_TEMP/body.md"
+          gh pr edit "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/body.md"

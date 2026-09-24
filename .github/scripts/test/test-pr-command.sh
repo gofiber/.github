@@ -336,6 +336,49 @@ check "only a failed push offers it" "yes" \
 check "a branch name cannot break out of the code span" "no" \
   "$(has '](https://evil' "$(comment 'HEAD_REF=x`](https://evil.example)')")"
 
+# --- pr-command-hint: the author's description is data, and only ever appended to.
+python3 - "$SCRIPT_DIR/../../workflows/pr-command-hint.yml" "$SANDBOX/hint.sh" <<'PYEOF'
+import sys, yaml
+
+workflow = yaml.safe_load(open(sys.argv[1], encoding='utf-8'))
+step = next(s for s in workflow['jobs']['hint']['steps'] if s.get('id') == 'append')
+open(sys.argv[2], 'w', encoding='utf-8').write(step['run'])
+PYEOF
+
+cat > "$SANDBOX/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$*" in
+  "pr view"*) cat "$SANDBOX/body.in" ;;
+  "pr edit"*) cp "${@: -1}" "$SANDBOX/body.out" ;; # the --body-file path
+esac
+EOF
+
+hint() { # $1 the description the pull request was opened with
+  printf '%s' "$1" > "$SANDBOX/body.in"
+  rm -f "$SANDBOX/body.out"
+  ( cd "$SANDBOX" && GH_TOKEN=stub REPO=gofiber/fiber PR=42 HINT='`/generate` re-runs the generators' \
+      bash "$SANDBOX/hint.sh" ) > "$SANDBOX/log.txt" 2>&1
+}
+edited() { grep -qF -- "$1" "$SANDBOX/body.out" 2>/dev/null && echo yes || echo no; }
+
+echo "--- the hint in the description"
+hint 'Fixes #1'
+check "the description is kept" "yes" "$(edited 'Fixes #1')"
+# shellcheck disable=SC2016 # the backticks are markdown in the description
+check "the hint is appended" "yes" "$(edited '<sub>🤖 Maintainers: `/generate` re-runs the generators</sub>')"
+
+# shellcheck disable=SC2016 # the description has to reach the step unexpanded
+hint 'run $(touch pwned) and `touch pwned` "quoted"'
+check "a description is data, never code" "no" "$([ -e "$SANDBOX/pwned" ] && echo yes || echo no)"
+# shellcheck disable=SC2016 # same text as above, compared literally
+check "and is written back byte for byte" "yes" "$(edited 'run $(touch pwned) and `touch pwned` "quoted"')"
+
+hint "$(printf 'text\n\n<!-- pr-command-hint -->\n<sub>earlier</sub>')"
+check "a second run leaves the description alone" "no" "$([ -e "$SANDBOX/body.out" ] && echo yes || echo no)"
+
+hint ''
+check "an empty description still gets the hint" "yes" "$(edited 'Maintainers:')"
+
 echo
 if [ "$fails" -gt 0 ]; then
   echo "$fails check(s) failed"
