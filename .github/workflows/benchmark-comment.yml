@@ -1,0 +1,53 @@
+name: benchmark-comment
+
+# Posts the benchmark report of a fork PR. A fork's pull_request run only gets a
+# read-only token, so benchmark-report stages the report as an artifact and this
+# workflow_run follow-up posts it with the same comment rules. Nothing from the
+# fork is checked out or run here; the artifacts are read as data only.
+#
+# A caller triggers on the benchmark workflow finishing and needs:
+#   on:
+#     workflow_run:
+#       workflows: [Benchmark]
+#       types: [completed]
+#   permissions:
+#     actions: read
+#     contents: read
+#     pull-requests: write
+
+on:
+  workflow_call:
+
+permissions:
+  actions: read
+  contents: read
+  pull-requests: write
+
+jobs:
+  comment:
+    if: >-
+      github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.head_repository.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # two runs of one PR finishing close together must not both post a first report
+    concurrency:
+      group: benchmark-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+    steps:
+      - name: Checkout central scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gofiber/.github
+          path: .central
+          sparse-checkout: .github/actions/benchmark-report
+          persist-credentials: false
+
+      - name: Post Benchmark Reports
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: bash .central/.github/actions/benchmark-report/fork-comment.sh

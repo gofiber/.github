@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# Drives the two comment steps of benchmark-report/action.yml against a fake `gh`:
-# which report gets refreshed, when a second one is posted instead, and what gets
-# collapsed. The steps are extracted from the action itself, so this cannot drift
-# from what actually ships.
+# Drives the comment scripts of benchmark-report against a fake `gh`: which report
+# gets refreshed, when a second one is posted instead, what gets collapsed, and
+# what the fork path refuses to take from a staged artifact.
 # Run from anywhere: bash .github/scripts/test/test-benchmark-comment.sh
 
 set -uo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ACTION="$SCRIPT_DIR/../../actions/benchmark-report/action.yml"
+SCRIPTS="$SCRIPT_DIR/../../actions/benchmark-report"
 MARKER='<!-- benchmark-report:. -->'
 
 fails=0
@@ -28,36 +27,25 @@ trap 'rm -rf "$SANDBOX"' EXIT
 WORK="$SANDBOX/work"
 mkdir -p "$WORK" "$SANDBOX/bin"
 
-extract() { # the run: block of a composite step, dedented
-  awk -v step="    - name: $1" '
-    $0 == step { found = 1; next }
-    found && /^      run: \|$/ { body = 1; next }
-    body { if ($0 ~ /^        / || $0 == "") { sub(/^        /, ""); print; next } else exit }
-  ' "$ACTION"
-}
-extract "Find Posted Report" > "$SANDBOX/find.sh"
-extract "Post Benchmark Report" > "$SANDBOX/post.sh"
-if [ ! -s "$SANDBOX/find.sh" ] || [ ! -s "$SANDBOX/post.sh" ]; then
-  echo "could not extract the comment steps from $ACTION"
-  exit 1
-fi
-
 cat > "$SANDBOX/bin/gh" <<'STUB'
 #!/usr/bin/env bash
-# records every call and answers the three reads the steps make
+# records every call and answers the reads the scripts make
 printf '%s\n' "$*" >> "$GH_LOG"
 case "$*" in
   *"issues/"*"/comments --paginate"*) cat "$GH_ROWS" ;;
   *"pulls/"*"/reviews --paginate"*) cat "$GH_REVIEWS" ;;
   *"issues/comments/"*"--jq .body"*) cat "$GH_BODY" ;;
   *"issues/comments/"*"--jq .node_id"*) echo "IC_node42" ;;
+  *"/pulls -f state=open"*) cat "$GH_PULLS" ;;
+  *"/artifacts --paginate"*) ls "$GH_STAGED" ;;
+  "run download "*) cp -R "$GH_STAGED/$7/." "$9" ;; # run download ID -R REPO -n NAME -D DIR
 esac
 STUB
 chmod +x "$SANDBOX/bin/gh"
 PATH="$SANDBOX/bin:$PATH"
 
 export GH_LOG="$SANDBOX/gh.log" GH_ROWS="$SANDBOX/rows.tsv" GH_BODY="$SANDBOX/body.md" \
-  GH_REVIEWS="$SANDBOX/reviews.txt"
+  GH_REVIEWS="$SANDBOX/reviews.txt" GH_PULLS="$SANDBOX/pulls.json" GH_STAGED="$SANDBOX/staged"
 printf '%s\n\n%s\n' "$MARKER" "the old numbers" > "$GH_BODY"
 printf '%s\n' "the new numbers" > "$WORK/report.md"
 
@@ -70,7 +58,7 @@ find_report() { # rows of "id<TAB>posted<TAB>mine<TAB>any benchmark report", plu
   (
     cd "$WORK" || exit 1
     GITHUB_OUTPUT="$SANDBOX/outputs" GH_TOKEN=x REPO=o/r PR=7 MARKER="$MARKER" \
-      bash "$SANDBOX/find.sh"
+      bash "$SCRIPTS/find-report.sh"
   )
   tr '\n' ' ' < "$SANDBOX/outputs"
 }
@@ -81,7 +69,7 @@ post() { # SIGNIFICANT CHANGED POSTED BURIED [PR]
     cd "$WORK" || exit 1
     GH_TOKEN=x REPO=o/r PR="${5-7}" SHA=deadbeef MARKER="$MARKER" \
       SIGNIFICANT="$1" CHANGED="$2" POSTED="$3" BURIED="$4" \
-      bash "$SANDBOX/post.sh"
+      bash "$SCRIPTS/post-report.sh"
   )
   grep -F -- '-X' "$GH_LOG" | sed -E 's/.*-X (POST|PATCH|DELETE) ([^ ]+).*/\1 \2/' | tr '\n' ';'
 }
@@ -142,6 +130,42 @@ check "no PATCH touches the old body" "no" \
 check "refreshing in place hides nothing" "no" \
   "$(post true false 42 true > /dev/null; grep -q graphql "$GH_LOG" && echo yes || echo no)"
 
+echo "--- a fork PR's staged report"
+stage() { # NAME WORKING-DIRECTORY SIGNIFICANT
+  mkdir -p "$GH_STAGED/$1"
+  printf '%s\n' "the fork numbers" > "$GH_STAGED/$1/report.md"
+  printf '%s\n' "$2" > "$GH_STAGED/$1/working-directory"
+  printf '%s\n' "$3" > "$GH_STAGED/$1/significant"
+  printf '%s\n' "true" > "$GH_STAGED/$1/changed"
+}
+fork_post() { # PR head sha and repo as the pulls API reports them
+  printf '[{"number": 7, "head": {"sha": "%s", "repo": {"full_name": "%s"}}}]\n' "$1" "$2" > "$GH_PULLS"
+  printf '1\tt1\tfalse\tfalse\n' > "$GH_ROWS"
+  : > "$GH_REVIEWS"
+  : > "$GH_LOG"
+  GH_TOKEN=x REPO=o/r RUN_ID=99 HEAD_REPO=fork/r HEAD_BRANCH=feat HEAD_SHA=abc \
+    bash "$SCRIPTS/fork-comment.sh" > /dev/null 2>&1
+  grep -E -- '-X (POST|PATCH)' "$GH_LOG" | sed -E 's/.*-X (POST|PATCH) ([^ ]+).*/\1 \2/' | tr '\n' ';'
+}
+if command -v jq > /dev/null 2>&1; then
+  rm -rf "$GH_STAGED"; stage benchmark-comment-. . true
+  check "lands on the PR the event points at" "POST repos/o/r/issues/7/comments;" "$(fork_post abc fork/r)"
+  check "a head that moved on posts nothing" "" "$(fork_post def fork/r)"
+  check "the same branch of another fork is not it" "" "$(fork_post abc other/r)"
+  rm -rf "$GH_STAGED"; stage benchmark-comment-. . TRUE
+  check "anything but a literal true is false" "" "$(fork_post abc fork/r)"
+  rm -rf "$GH_STAGED"; stage benchmark-comment-. . true
+  ln -sf "$GH_BODY" "$GH_STAGED/benchmark-comment-./report.md"
+  check "a symlinked report is refused" "" "$(fork_post abc fork/r)"
+  rm -rf "$GH_STAGED"; stage benchmark-comment-a 'a"b' true; stage benchmark-comment-redis redis true
+  check "a bad module is refused, the next one still posts" "POST repos/o/r/issues/7/comments;" \
+    "$(fork_post abc fork/r)"
+  check "the marker follows the staged module" "yes" \
+    "$(grep -qF 'startswith("<!-- benchmark-report:redis -->")' "$GH_LOG" && echo yes || echo no)"
+else
+  echo "skip fork checks, jq is not installed"
+fi
+
 echo "--- the jq filter that feeds all of this"
 if command -v jq > /dev/null 2>&1; then
   cat > "$SANDBOX/comments.json" <<'EOF'
@@ -155,10 +179,10 @@ EOF
 else
   echo "skip jq filter check, jq is not installed"
 fi
-# the filter above is a copy, so make sure the action still asks for the same four fields
-check "the action still emits the same rows" "yes" \
-  "$(grep -qF '[.id, .created_at, (.body' "$ACTION" \
-    && grep -qF 'startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv' "$ACTION" && echo yes || echo no)"
+# the filter above is a copy, so make sure the script still asks for the same four fields
+check "the script still emits the same rows" "yes" \
+  "$(grep -qF '[.id, .created_at, (.body' "$SCRIPTS/find-report.sh" \
+    && grep -qF 'startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv' "$SCRIPTS/find-report.sh" && echo yes || echo no)"
 
 echo
 if [ "$fails" -gt 0 ]; then

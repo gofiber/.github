@@ -48,6 +48,13 @@ action is allowed to be loud exactly once per finding.
   report.
 - **Pushes to the default branch** have no PR to comment on and report regressions
   as a commit comment. Improvements are not worth a commit comment.
+- **Fork PRs are posted by a follow-up run.** A fork's `pull_request` run gets a
+  read-only token, so it stages the report as a `benchmark-comment-<module>`
+  artifact and the caller's `workflow_run` job
+  ([`benchmark-comment.yml`](../../workflows/benchmark-comment.yml)) posts it by the
+  same rules. The artifact is fork-controlled data: the PR comes from the event, a
+  head that moved on posts nothing (the newer run reports), and a report that is a
+  symlink, too large or names an odd module is refused.
 - **Commenting never fails the job.** Both comment steps are `continue-on-error`, so
   a rate limit or a missing permission is a warning and not a red benchmark gate. A
   failed lookup skips the posting for that run rather than posting a duplicate.
@@ -173,6 +180,7 @@ bash .github/scripts/test/test-benchmark-comment.sh      # the comment rules abo
 bash .github/scripts/test/test-benchmark-cpu-key.sh      # hardware identity
 ```
 
-`test-benchmark-comment.sh` extracts the comment steps out of `action.yml` and runs
-them against a fake `gh`, so it tests what ships rather than a copy. All three run in
-the `scripts` job of [`test-actions.yml`](../../workflows/test-actions.yml).
+`test-benchmark-comment.sh` runs the comment scripts (`find-report.sh`,
+`post-report.sh`, `fork-comment.sh`) against a fake `gh`; the action and the fork
+workflow call the same files, so it tests what ships rather than a copy. All three run
+in the `scripts` job of [`test-actions.yml`](../../workflows/test-actions.yml).

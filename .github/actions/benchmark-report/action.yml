@@ -142,7 +142,8 @@ runs:
         echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
 
     # What the PR already says decides whether this run has anything to add, so the
-    # posted report is fetched before the comparison runs.
+    # posted report is fetched before the comparison runs. Fork runs read it too, a
+    # read-only token is enough for that.
     - name: Find Posted Report
       id: posted
       # commenting is not what this job gates on, so an API hiccup here stays a
@@ -150,7 +151,6 @@ runs:
       continue-on-error: true
       if: >-
         github.event_name == 'pull_request'
-        && github.event.pull_request.head.repo.fork != true
         && steps.cpu.outputs.comparable == 'true'
       shell: bash
       env:
@@ -158,41 +158,8 @@ runs:
         REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
         MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
-      run: |
-        set -euo pipefail
-        # id, when it was posted, is it this module's report, is it any module's report
-        rows="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate \
-          --jq ".[] | [.id, .created_at, (.body | startswith(\"${MARKER}\") | tostring), (.body | startswith(\"<!-- benchmark-report:\") | tostring)] | @tsv")"
-        id=""
-        posted_at=""
-        buried=false
-        while IFS=$'\t' read -r comment created mine report; do
-          if [[ "$mine" == "true" ]]; then
-            id="$comment"
-            posted_at="$created"
-            buried=false
-          elif [[ -n "$id" && "$report" != "true" ]]; then
-            # only foreign comments bury a report, the sibling modules' ones do not
-            buried=true
-          fi
-        done <<< "$rows"
-        # reviews are not in the issues endpoint, yet in the thread they sit below
-        # the report just the same; a single inline comment is one too (bodyless,
-        # state COMMENTED), so this covers both
-        if [[ -n "$id" && "$buried" != "true" ]]; then
-          reviewed_at="$(gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate \
-            --jq '.[] | .submitted_at // empty' | sort | tail -n 1)"
-          if [[ "$reviewed_at" > "$posted_at" ]]; then
-            buried=true
-          fi
-        fi
-        {
-          echo "id=${id}"
-          echo "buried=${buried}"
-        } >> "$GITHUB_OUTPUT"
-        if [[ -n "$id" ]]; then
-          gh api "repos/${REPO}/issues/comments/${id}" --jq .body > previous.md
-        fi
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/find-report.sh"
 
     - name: Compare With Baseline
       id: compare
@@ -352,41 +319,41 @@ runs:
         BURIED: ${{ steps.posted.outputs.buried }}
         # per module, so the matrix legs of a multi-package repo do not overwrite each other
         MARKER: <!-- benchmark-report:${{ inputs.working-directory }} -->
+        ACTION_PATH: ${{ github.action_path }}
+      run: bash "${ACTION_PATH}/post-report.sh"
+
+    # A fork run's token cannot comment, so the report is handed to the caller's
+    # workflow_run follow-up (workflows/benchmark-comment.yml), which posts it.
+    - name: Stage Report For Fork PR
+      id: stage
+      continue-on-error: true
+      if: >-
+        steps.compare.outputs.compared == 'true'
+        && steps.posted.outcome != 'failure'
+        && github.event_name == 'pull_request'
+        && github.event.pull_request.head.repo.fork == true
+      shell: bash
+      env:
+        WORKING_DIRECTORY: ${{ inputs.working-directory }}
+        SIGNIFICANT: ${{ steps.compare.outputs.significant }}
+        CHANGED: ${{ steps.compare.outputs.changed }}
       run: |
         set -euo pipefail
-        { printf '%s\n\n' "$MARKER"; cat report.md; } > comment.md
-        if [[ -z "$PR" ]]; then
-          gh api -X POST "repos/${REPO}/commits/${SHA}/comments" -F body=@comment.md > /dev/null
-          exit 0
-        fi
-        if [[ -z "$POSTED" ]]; then
-          if [[ "$SIGNIFICANT" == "true" ]]; then
-            gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
-          fi
-          exit 0
-        fi
-        # the posted report already says "nothing to see here" and still holds
-        if [[ "$CHANGED" != "true" && "$SIGNIFICANT" != "true" ]]; then
-          exit 0
-        fi
-        # editing sends no notification, so the numbers stay current for free, but
-        # only while the report is still the last word in the thread
-        if [[ "$BURIED" != "true" ]]; then
-          gh api -X PATCH "repos/${REPO}/issues/comments/${POSTED}" -F body=@comment.md > /dev/null
-          exit 0
-        fi
-        # a buried report is what the thread below it replied to: never rewritten,
-        # only superseded by a new comment once the findings moved
-        if [[ "$CHANGED" != "true" ]]; then
-          exit 0
-        fi
-        gh api -X POST "repos/${REPO}/issues/${PR}/comments" -F body=@comment.md > /dev/null
-        # the superseded report is hidden, not rewritten: its body (and marker) stay
-        # intact, GitHub folds it away and labels it outdated
-        node="$(gh api "repos/${REPO}/issues/comments/${POSTED}" --jq .node_id)"
-        gh api graphql \
-          -f query='mutation($id: ID!) { minimizeComment(input: {subjectId: $id, classifier: OUTDATED}) { minimizedComment { isMinimized } } }' \
-          -f id="$node" > /dev/null
+        mkdir -p benchmark-comment
+        cp report.md benchmark-comment/report.md
+        printf '%s\n' "$WORKING_DIRECTORY" > benchmark-comment/working-directory
+        printf '%s\n' "$SIGNIFICANT" > benchmark-comment/significant
+        printf '%s\n' "$CHANGED" > benchmark-comment/changed
+        echo "slug=$(printf '%s' "$WORKING_DIRECTORY" | tr -cs '[:alnum:]._-' '-')" >> "$GITHUB_OUTPUT"
+
+    - name: Upload Report For Fork PR
+      continue-on-error: true
+      if: steps.stage.outcome == 'success'
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: benchmark-comment-${{ steps.stage.outputs.slug }}
+        path: benchmark-comment/
+        retention-days: 1
 
     - name: Fail On Regression
       if: steps.compare.outputs.regressed == 'true' && github.event_name == 'pull_request'
