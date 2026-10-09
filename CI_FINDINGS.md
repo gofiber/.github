@@ -116,7 +116,7 @@ picked per workload, not uniformly:
 | Where | Label |
 | --- | --- |
 | Go tests, lint, security scans, benchmark default | `blacksmith-4vcpu-ubuntu-2404` |
-| fiber `repeated`, recipes `gobuild`, docs `deploy`, CodeQL Go | `blacksmith-8vcpu-ubuntu-2404` |
+| fiber `repeated`, recipes `build`, docs `deploy`, CodeQL Go | `blacksmith-8vcpu-ubuntu-2404` |
 | markdown, spell-check, coordination jobs | `blacksmith-2vcpu-ubuntu-2404` |
 | Windows legs | `blacksmith-4vcpu-windows-2025` (Public Beta) |
 | macOS legs | `blacksmith-6vcpu-macos-latest` (6 vCPU is the smallest offered) |
@@ -146,7 +146,9 @@ requires 1.25.8 and would have been next.
 
 Setting `GOTOOLCHAIN: auto` at job level is not a workaround: the recipes build log
 shows `GOTOOLCHAIN: local` in the step environment even though the job sets `auto`,
-because setup-go's `exportVariable` wins.
+because setup-go's `exportVariable` wins. An `export GOTOOLCHAIN=auto` inside the run
+script is out of its reach, which is what recipes `build.yml` does. It also covers a
+module that needs a newer minor than the matrix leg, which `check-latest` cannot.
 
 ### Caches do not carry over
 
