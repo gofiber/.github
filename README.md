@@ -1,3 +1,8 @@
+<p align="center">
+  <img height="125" alt="Fiber .github" src="https://raw.githubusercontent.com/gofiber/.github/main/.github/logo-dark.svg#gh-dark-mode-only" />
+  <img height="125" alt="Fiber .github" src="https://raw.githubusercontent.com/gofiber/.github/main/.github/logo.svg#gh-light-mode-only" />
+</p>
+
 # .github
 
 Centralized configurations and reusable GitHub Actions workflows for the gofiber organization.
