@@ -19,16 +19,13 @@
 # Reads env: GH_REPO, LOW_PRIORITY_SECTIONS (optional, default
 # "Maintenance,Documentation"), RUNNER_TEMP (optional, default /tmp).
 
-# bullet_pr_number: prints the PR number a bullet line references
-# ("#123" or ".../pull/123"), or nothing.
+# bullet_pr_number: prints the PR number of a bullet line, or nothing.
+# Takes the last "#123" or ".../pull/123": the bullet's own reference
+# trails the title, and the title may mention other numbers.
 bullet_pr_number() {
-  local line="$1"
-  local pr_num
-  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
-  if [ -z "$pr_num" ]; then
-    pr_num=$(printf '%s' "$line" | grep -oE '/pull/[0-9]+' | head -1 | sed 's|/pull/||')
-  fi
-  printf '%s' "$pr_num"
+  local ref
+  ref=$(printf '%s' "$1" | grep -oE '#[0-9]+|/pull/[0-9]+' | tail -1)
+  printf '%s' "${ref##*[!0-9]}"
 }
 
 # is_gofiber_bump_pr: returns 0 if the bullet line references a
@@ -36,16 +33,19 @@ bullet_pr_number() {
 # commit metadata, because grouped bumps do not name the module in the
 # title ("bump the utils-modules group across 3 directories").
 is_gofiber_bump_pr() {
-  local pr_num bodies
+  local pr_num meta
   pr_num=$(bullet_pr_number "$1")
   [ -z "$pr_num" ] && return 1
-  if ! bodies=$(gh pr view "$pr_num" --repo "$GH_REPO" --json commits \
-                  --jq '.commits[].messageBody' 2>&1); then
+  # First line is the PR author, the rest are the commit bodies.
+  if ! meta=$(gh pr view "$pr_num" --repo "$GH_REPO" --json author,commits \
+                --jq '.author.login, .commits[].messageBody' 2>&1); then
     # Holding is the safe side, but unannounced it reads like a plain cooldown.
-    echo "::warning::is_gofiber_bump_pr: gh pr view '${pr_num}' failed, not counted as gofiber bump: ${bodies%%$'\n'*}" >&2
+    echo "::warning::is_gofiber_bump_pr: gh pr view '${pr_num}' failed, not counted as gofiber bump: ${meta%%$'\n'*}" >&2
     return 1
   fi
-  [[ "$bodies" == *"dependency-name: github.com/gofiber/"* ]]
+  # Only Dependabot's own trailer counts, not one pasted into a human PR.
+  [[ "${meta%%$'\n'*}" == *dependabot* ]] || return 1
+  [[ "$meta" == *"dependency-name: github.com/gofiber/"* ]]
 }
 
 # is_dependabot_gha_pr: returns 0 if the bullet line references a PR

@@ -25,6 +25,7 @@ export RUNNER_TEMP="$SANDBOX"
 # Stub gh. Reads PR / release fixtures from files in $RUNNER_TEMP.
 # pr_db   format: <pr_num>\t<branch>\t<author>
 # dep_db  format: <pr_num>\t<bumped module>   ("error" = lookup fails)
+#   the PR author of that lookup comes from pr_db
 # rel_db  format: <tag>\t<status>\t<published_at>
 #   status: ok | missing | error
 #
@@ -42,20 +43,29 @@ cat > "$SANDBOX/gh" << 'STUB'
 case "$1 $2" in
   "pr view")
     pr_num="$3"
-    # Commit-metadata lookup (is_gofiber_bump_pr). A PR that is not in
-    # dep_db prints nothing, like a human PR without Dependabot metadata.
-    if printf '%s' "$*" | grep -q -- '--json commits'; then
-      db="$RUNNER_TEMP/dep_db"
-      [ -f "$db" ] || exit 0
-      while IFS=$'\t' read -r num module; do
-        if [ "$num" = "$pr_num" ] && [ "$module" = "error" ]; then
-          printf 'HTTP 502 bad gateway\n' >&2
-          exit 1
-        fi
-        if [ "$num" = "$pr_num" ]; then
-          printf -- '---\nupdated-dependencies:\n- dependency-name: %s\n  dependency-version: 1.2.3\n  dependency-type: direct:production\n...\n' "$module"
-        fi
-      done < "$db"
+    # Author + commit-metadata lookup (is_gofiber_bump_pr). The author
+    # comes from pr_db (a PR missing there is a human PR), the Dependabot
+    # trailer from dep_db.
+    if printf '%s' "$*" | grep -q -- '--json author,commits'; then
+      author='human-author'
+      if [ -f "$RUNNER_TEMP/pr_db" ]; then
+        while IFS=$'\t' read -r num _ login; do
+          [ "$num" = "$pr_num" ] && author="$login"
+        done < "$RUNNER_TEMP/pr_db"
+      fi
+      trailer=''
+      if [ -f "$RUNNER_TEMP/dep_db" ]; then
+        while IFS=$'\t' read -r num module; do
+          [ "$num" = "$pr_num" ] || continue
+          if [ "$module" = "error" ]; then
+            printf 'HTTP 502 bad gateway\n' >&2
+            exit 1
+          fi
+          trailer+="- dependency-name: ${module}"$'\n'"  dependency-type: direct:production"$'\n'
+        done < "$RUNNER_TEMP/dep_db"
+      fi
+      printf '%s\n' "$author"
+      [ -n "$trailer" ] && printf -- '---\nupdated-dependencies:\n%s...\n' "$trailer"
       exit 0
     fi
     # Validate expected flags are present
@@ -285,6 +295,23 @@ set_dep 20 'github.com/gofiber/utils/v2'
 expect_eq "github_actions + gofiber bump" "has-changes" \
   "$(classify_run "$(printf '## Maintenance\n- Bump (#1)\n- bump the gofiber group (#20)\n')")"
 
+reset_fixtures
+set_pr 22 'chore/bump-fiber' 'human-author'
+set_dep 22 'github.com/gofiber/fiber/v3'
+expect_eq "copied trailer in a human PR stays low" "low-only" \
+  "$(classify_run "$(printf '## Maintenance\n- bump fiber by hand (#22)\n')")"
+
+# ── bullet_pr_number (direct) ────────────────────────────────────────
+printf '# bullet_pr_number\n'
+
+expect_eq "trailing reference wins over a number in the title" "302" \
+  "$(bullet_pr_number '- improve error message for #301 case (#302)')"
+expect_eq "trailing /pull/ URL wins over a number in the title" "20" \
+  "$(bullet_pr_number '- fix #12 by @u in https://github.com/x/y/pull/20')"
+expect_eq "trailing reference wins over a /pull/ URL in the title" "20" \
+  "$(bullet_pr_number '- revert https://github.com/x/y/pull/15 (#20)')"
+expect_eq "no reference => empty" "" "$(bullet_pr_number '- no number here')"
+
 # ── is_dependabot_gha_pr (direct) ────────────────────────────────────
 printf '# is_dependabot_gha_pr\n'
 
@@ -304,18 +331,24 @@ is_dependabot_gha_pr "- no number here"; expect_false "no PR number => false" $?
 printf '# is_gofiber_bump_pr\n'
 
 reset_fixtures
+for n in 1 2 3 5; do set_pr "$n" 'dependabot/go_modules/x' 'dependabot[bot]'; done
+set_pr 4 'feature/y' 'human-author'
+set_pr 7 'chore/bump-fiber' 'human-author'
 set_dep 1 'github.com/gofiber/fiber/v3'
 set_dep 2 'golang.org/x/sys'
 set_dep 3 'github.com/gofiber-community/x'
 set_dep 5 'golang.org/x/sys'
 set_dep 5 'github.com/gofiber/schema'
+set_dep 7 'github.com/gofiber/fiber/v3'
 
 is_gofiber_bump_pr "- bump the fiber-modules group (#1)"; expect_true  "gofiber module => true" $?
 is_gofiber_bump_pr "- bump x/sys (#2)"; expect_false "other module => false" $?
 is_gofiber_bump_pr "- bump lookalike (#3)"; expect_false "lookalike org => false" $?
 is_gofiber_bump_pr "- human PR (#4)"; expect_false "no Dependabot metadata => false" $?
 is_gofiber_bump_pr "- mixed group (#5)"; expect_true  "gofiber module among others => true" $?
+is_gofiber_bump_pr "- bump fiber by hand (#7)"; expect_false "copied trailer in a human PR => false" $?
 is_gofiber_bump_pr "- bump https://github.com/x/y/pull/1"; expect_true  "/pull/ URL form => true" $?
+is_gofiber_bump_pr "- follow-up to #2 (#1)"; expect_true  "number in the title is not the PR => true" $?
 is_gofiber_bump_pr "- no number here"; expect_false "no PR number => false" $?
 
 set_dep 6 'error'
