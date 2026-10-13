@@ -8,6 +8,7 @@
 # This file is the single source of truth for:
 #   - classify_draft_priority: classify a draft body as empty/low-only/has-changes
 #   - is_dependabot_gha_pr:    detect Dependabot CI-workflow dependency bumps
+#   - is_gofiber_bump_pr:      detect Dependabot bumps of github.com/gofiber/* modules
 #   - weeks_since_release:     compute weeks elapsed since a prev tag's publish
 #   - detect_major_bump:       detect major-version bumps (semver + Breaking section)
 #
@@ -18,6 +19,35 @@
 # Reads env: GH_REPO, LOW_PRIORITY_SECTIONS (optional, default
 # "Maintenance,Documentation"), RUNNER_TEMP (optional, default /tmp).
 
+# bullet_pr_number: prints the PR number of a bullet line, or nothing.
+# Takes the last "#123" or ".../pull/123": the bullet's own reference
+# trails the title, and the title may mention other numbers.
+bullet_pr_number() {
+  local ref
+  ref=$(printf '%s' "$1" | grep -oE '#[0-9]+|/pull/[0-9]+' | tail -1)
+  printf '%s' "${ref##*[!0-9]}"
+}
+
+# is_gofiber_bump_pr: returns 0 if the bullet line references a
+# Dependabot PR that bumps a github.com/gofiber/* module. Read from the
+# commit metadata, because grouped bumps do not name the module in the
+# title ("bump the utils-modules group across 3 directories").
+is_gofiber_bump_pr() {
+  local pr_num meta
+  pr_num=$(bullet_pr_number "$1")
+  [ -z "$pr_num" ] && return 1
+  # First line is the PR author, the rest are the commit bodies.
+  if ! meta=$(gh pr view "$pr_num" --repo "$GH_REPO" --json author,commits \
+                --jq '.author.login, .commits[].messageBody' 2>&1); then
+    # Holding is the safe side, but unannounced it reads like a plain cooldown.
+    echo "::warning::is_gofiber_bump_pr: gh pr view '${pr_num}' failed, not counted as gofiber bump: ${meta%%$'\n'*}" >&2
+    return 1
+  fi
+  # Only Dependabot's own trailer counts, not one pasted into a human PR.
+  [[ "${meta%%$'\n'*}" == *dependabot* ]] || return 1
+  [[ "$meta" == *"dependency-name: github.com/gofiber/"* ]]
+}
+
 # is_dependabot_gha_pr: returns 0 if the bullet line references a PR
 # opened by Dependabot for a github_actions workflow dependency bump
 # (i.e. branch contains "github_actions" AND author contains
@@ -26,12 +56,8 @@
 # never triggers a release. Callers should pre-filter to bullet
 # lines via the same regex used in classify_draft_priority.
 is_dependabot_gha_pr() {
-  local line="$1"
   local pr_num
-  pr_num=$(printf '%s' "$line" | grep -oE '#[0-9]+' | head -1 | tr -d '#')
-  if [ -z "$pr_num" ]; then
-    pr_num=$(printf '%s' "$line" | grep -oE '/pull/[0-9]+' | head -1 | sed 's|/pull/||')
-  fi
+  pr_num=$(bullet_pr_number "$1")
   [ -z "$pr_num" ] && return 1
   local meta branch author
   meta=$(gh pr view "$pr_num" --repo "$GH_REPO" --json headRefName,author \
@@ -46,23 +72,27 @@ is_dependabot_gha_pr() {
 #   empty       - no actionable bullets after filtering
 #   low-only    - bullets only in low-priority sections
 #   has-changes - at least one bullet in another section
-#                 (features, fixes, updates, breaking, ...)
+#                 (features, fixes, updates, breaking, ...), or a
+#                 gofiber module bump in a low-priority section
 #
 # Headings are matched case-insensitively as a substring against the
 # keywords in $LOW_PRIORITY_SECTIONS (default "Maintenance,
 # Documentation"), so emoji-prefixed headers like "## 🧹 Maintenance"
 # work. Bullets in low-priority sections that reference a Dependabot
 # github_actions PR are filtered out (see is_dependabot_gha_pr).
+# Bullets there that bump a github.com/gofiber/* module count as
+# high-priority (see is_gofiber_bump_pr), so dependents ship a new
+# fiber/utils/... version with the next run instead of after the
+# cooldown.
 #
 # All headings that do NOT match a low-priority keyword count as
 # high-priority, so new section names added to release-drafter never
 # need to be listed explicitly.
 #
 # Optimization: once one confirmed real low-priority bullet has been
-# seen, subsequent low-priority bullets are not API-checked, since
-# the result is already pinned to low-only (unless a high-priority
-# bullet appears later, in which case the answer flips to
-# has-changes regardless).
+# seen, subsequent low-priority bullets skip the github_actions
+# check, and once the result is pinned to has-changes they are not
+# API-checked at all.
 classify_draft_priority() {
   local section=""
   local has_low=false
@@ -96,6 +126,11 @@ classify_draft_priority() {
     if [[ "$line" =~ ^-\ .*(#[0-9]+|/pull/[0-9]+|/issues?/[0-9]+) ]]; then
       case "$section" in
         low)
+          [ "$has_high" = "true" ] && continue
+          if is_gofiber_bump_pr "$line"; then
+            has_high=true
+            continue
+          fi
           if [ "$has_low" = "false" ] && is_dependabot_gha_pr "$line"; then
             continue
           fi

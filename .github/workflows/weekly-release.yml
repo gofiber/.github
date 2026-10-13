@@ -24,8 +24,10 @@ name: weekly-release
 #     and/or Documentation are held until N weeks (default 3) have
 #     elapsed since the previous release of the same package. Dependabot
 #     github_actions bumps are filtered out so a draft made of only
-#     those never publishes. See inputs low-priority-cooldown-weeks and
-#     low-priority-sections.
+#     those never publishes. Dependabot bumps of a github.com/gofiber/*
+#     module skip the cooldown, so dependents ship a new fiber/utils/...
+#     version with the next run. See inputs low-priority-cooldown-weeks
+#     and low-priority-sections.
 #   - config-ref default is '' (empty). Empty resolves to 'main', so
 #     the script helpers in .central/.github/scripts/ track the latest
 #     central main. Pass an explicit config-ref (branch, tag, or SHA)
@@ -110,7 +112,8 @@ on:
           list, bullets in low-priority sections that reference a
           Dependabot github_actions PR (CI workflow dependency bumps)
           are filtered out entirely, so a draft made of only those
-          never releases.
+          never releases, and bullets that bump a github.com/gofiber/*
+          module count as high-priority.
         required: false
         type: string
         default: 'Maintenance,Documentation'
