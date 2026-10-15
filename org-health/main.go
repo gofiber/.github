@@ -11,13 +11,15 @@
 // lint or tests in their own PR is the CI doing its job. Only patterns that
 // point at broken infrastructure produce findings: the same workflow failing
 // across unrelated PRs, runs turning red without any code change, or a
-// default branch that was merged green and is red now.
+// default branch that was merged green and is red now. A posted finding that a
+// later run proves fixed gets a resolved post.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"strings"
 	"time"
@@ -61,16 +63,18 @@ func main() {
 	}
 
 	var findings []Finding
+	healthy := map[string]string{} // finding key -> URL of the proof, see resolved
 	var failed []string
 	for _, repo := range repos {
 		th := cfg.thresholds(repo)
 		var fs []Finding
+		var hs map[string]string
 		var err error
 		switch *mode {
 		case "scan":
-			fs, err = scanRepo(gh, cfg.Org, repo, th, now)
+			fs, hs, err = scanRepo(gh, cfg.Org, repo, th, now)
 		case "digest":
-			fs, err = digestRepo(gh, cfg.Org, repo, th, now)
+			fs, hs, err = digestRepo(gh, cfg.Org, repo, th, now)
 		default:
 			log.Fatalf("unknown mode %q", *mode)
 		}
@@ -80,12 +84,14 @@ func main() {
 			continue
 		}
 		findings = append(findings, fs...)
+		maps.Copy(healthy, hs)
 	}
 
 	findings = applySuppressions(findings, sups, now, log.Printf)
 	findings = state.filterAlerted(findings, func(repo string) time.Duration {
 		return time.Duration(cfg.thresholds(repo).CooldownHours) * time.Hour
 	}, now)
+	resolved := state.resolved(healthy)
 
 	switch {
 	case len(findings) == 0:
@@ -99,7 +105,25 @@ func main() {
 		if err := postFindings(webhook, *mode, cfg.Org, findings); err != nil {
 			log.Fatalf("post to Discord: %v", err)
 		}
+		state.markOpen(findings)
 		log.Printf("%s: posted %d findings", *mode, len(findings))
+	}
+
+	// A failed resolved post must not fail the run before the state is saved:
+	// the findings above are posted already and would be posted twice.
+	var resolvedErr error
+	switch {
+	case len(resolved) == 0:
+	case *dryRun:
+		log.Printf("%s: %d resolved (dry run, not posting)", *mode, len(resolved))
+		for _, f := range resolved {
+			fmt.Printf("[resolved %s] %s\n    %s\n", f.Check, f.Title, f.URL)
+		}
+	default:
+		if resolvedErr = postResolved(webhook, cfg.Org, resolved); resolvedErr == nil {
+			state.close(resolved)
+			log.Printf("%s: posted %d resolved", *mode, len(resolved))
+		}
 	}
 
 	// Dry runs must not consume the cooldown of findings they did not post.
@@ -108,6 +132,9 @@ func main() {
 		if err := saveState(*statePath, state); err != nil {
 			log.Printf("save state: %v", err)
 		}
+	}
+	if resolvedErr != nil {
+		log.Fatalf("post resolved to Discord: %v", resolvedErr)
 	}
 	if len(failed) > 0 {
 		log.Fatalf("repos with errors: %s", strings.Join(failed, ", "))

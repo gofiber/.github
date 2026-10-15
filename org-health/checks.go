@@ -33,16 +33,24 @@ const (
 	checkIssueSpike       = "issue-spike"
 )
 
+// The three branch-failure classifications share one key, see detectBranchFailures.
+const branchFailureKind = "branch-failure"
+
+func workflowKey(repo, kind string, workflowID int64) string {
+	return fmt.Sprintf("%s/%s/%d", repo, kind, workflowID)
+}
+
 // scanRepo runs the frequent checks: default-branch failures and workflows
-// failing across several PRs at once.
-func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, error) {
+// failing across several PRs at once. The map holds the keys the runs prove
+// fixed, each with the run that proves it.
+func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, map[string]string, error) {
 	branch, err := g.defaultBranch(org, repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	branchRuns, err := g.listRuns(org, repo, url.Values{"branch": {branch}}, now.Add(-maxFailureAge))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	findings := detectBranchFailures(repo, branchRuns, now)
 
@@ -53,7 +61,7 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 		"created": {">=" + since.Format(time.RFC3339)},
 	}, since)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var recentBranchRuns []workflowRun
 	for _, r := range branchRuns {
@@ -62,7 +70,35 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 		}
 	}
 	findings = append(findings, detectCrossPRFailures(repo, prRuns, recentBranchRuns, th.CrossPRMinPRs)...)
-	return findings, nil
+	return findings, scanHealthy(repo, branchRuns, recentBranchRuns, prRuns, findings), nil
+}
+
+// scanHealthy proves a finding fixed by a green run after its last failure.
+// Absence proves nothing: both checks lose old failures out of their window.
+func scanHealthy(repo string, branchRuns, recentBranchRuns, prRuns []workflowRun, findings []Finding) map[string]string {
+	healthy := map[string]string{}
+	for id, rs := range branchSignal(branchRuns) {
+		if rs[0].Conclusion == "success" {
+			healthy[workflowKey(repo, branchFailureKind, id)] = rs[0].HTMLURL
+			healthy[workflowKey(repo, checkStartupFailure, id)] = rs[0].HTMLURL
+		}
+	}
+	failing := map[string]bool{}
+	for _, f := range findings {
+		failing[f.Key] = true
+	}
+	lastPRFailure := map[int64]time.Time{}
+	for _, r := range prRuns {
+		if r.CreatedAt.After(lastPRFailure[r.WorkflowID]) {
+			lastPRFailure[r.WorkflowID] = r.CreatedAt
+		}
+	}
+	for id, r := range greenRuns(recentBranchRuns) {
+		if k := workflowKey(repo, checkCrossPR, id); !failing[k] && r.CreatedAt.After(lastPRFailure[id]) {
+			healthy[k] = r.HTMLURL
+		}
+	}
+	return healthy
 }
 
 // A deleted or dormant workflow keeps its last red run as the latest one
@@ -78,36 +114,8 @@ const maxFailureAge = 7 * 24 * time.Hour
 // commit that was green before can only be the environment, never the code;
 // that distinction is surfaced as its own check.
 func detectBranchFailures(repo string, runs []workflowRun, now time.Time) []Finding {
-	byWorkflow := map[int64][]workflowRun{}
-	for _, r := range runs { // runs arrive newest first
-		if r.Status != "completed" {
-			continue
-		}
-		// The branch filter matches head_branch, so a fork PR whose branch is
-		// named like the default branch shows up here. PR events are never
-		// default-branch signal.
-		if r.Event == "pull_request" || r.Event == "pull_request_target" {
-			continue
-		}
-		// GitHub's own managed jobs (dependabot updates, dependency graph,
-		// default-setup CodeQL) run as "dynamic". They are not the repo's CI:
-		// their failures are dependency problems, they report in their own tab,
-		// and their run name carries the updated directories, which makes an
-		// unreadable alert title. 6 of the green-to-red edges over 30 days came
-		// from them, 4 of those from one known npm pin in docs.
-		if r.Event == "dynamic" {
-			continue
-		}
-		// Cancelled/skipped runs carry no green/red signal; keeping them would
-		// mask the transition edge (cancel-in-progress on busy branches).
-		if r.Conclusion == "cancelled" || r.Conclusion == "skipped" {
-			continue
-		}
-		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
-	}
-
 	var findings []Finding
-	for _, rs := range byWorkflow {
+	for _, rs := range branchSignal(runs) {
 		latest := rs[0]
 		if now.Sub(latest.CreatedAt) > maxFailureAge {
 			continue
@@ -157,7 +165,7 @@ func detectBranchFailures(repo string, runs []workflowRun, now time.Time) []Find
 				// both would hand a flapping workflow a fresh key on every flip
 				// and let it alert past its cooldown (storage Benchmark, 3x in 8h,
 				// and it alternates between push and schedule runs).
-				Key: fmt.Sprintf("%s/branch-failure/%d", repo, latest.WorkflowID),
+				Key: workflowKey(repo, branchFailureKind, latest.WorkflowID),
 			})
 		case "startup_failure":
 			findings = append(findings, Finding{
@@ -167,12 +175,45 @@ func detectBranchFailures(repo string, runs []workflowRun, now time.Time) []Find
 				Title:    fmt.Sprintf("%s: %s cannot start", repo, latest.Name),
 				Detail:   "the workflow file itself is broken (startup_failure)",
 				URL:      latest.HTMLURL,
-				Key:      fmt.Sprintf("%s/%s/%d", repo, checkStartupFailure, latest.WorkflowID),
+				Key:      workflowKey(repo, checkStartupFailure, latest.WorkflowID),
 			})
 		}
 	}
 	sortFindings(findings)
 	return findings
+}
+
+// branchSignal groups the runs that carry green/red signal for the default
+// branch by workflow, newest first.
+func branchSignal(runs []workflowRun) map[int64][]workflowRun {
+	byWorkflow := map[int64][]workflowRun{}
+	for _, r := range runs { // runs arrive newest first
+		if r.Status != "completed" {
+			continue
+		}
+		// The branch filter matches head_branch, so a fork PR whose branch is
+		// named like the default branch shows up here. PR events are never
+		// default-branch signal.
+		if r.Event == "pull_request" || r.Event == "pull_request_target" {
+			continue
+		}
+		// GitHub's own managed jobs (dependabot updates, dependency graph,
+		// default-setup CodeQL) run as "dynamic". They are not the repo's CI:
+		// their failures are dependency problems, they report in their own tab,
+		// and their run name carries the updated directories, which makes an
+		// unreadable alert title. 6 of the green-to-red edges over 30 days came
+		// from them, 4 of those from one known npm pin in docs.
+		if r.Event == "dynamic" {
+			continue
+		}
+		// Cancelled/skipped runs carry no green/red signal; keeping them would
+		// mask the transition edge (cancel-in-progress on busy branches).
+		if r.Conclusion == "cancelled" || r.Conclusion == "skipped" {
+			continue
+		}
+		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
+	}
+	return byWorkflow
 }
 
 // detectCrossPRFailures flags a workflow that failed on at least minPRs
@@ -188,12 +229,7 @@ func detectBranchFailures(repo string, runs []workflowRun, now time.Time) []Find
 // no green default-branch run the finding still fires, annotated with the
 // bot name so the reader can judge.
 func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun, minPRs int) []Finding {
-	greenOnDefault := map[int64]bool{}
-	for _, r := range defaultBranchRuns {
-		if r.Status == "completed" && r.Conclusion == "success" {
-			greenOnDefault[r.WorkflowID] = true
-		}
-	}
+	greenOnDefault := greenRuns(defaultBranchRuns)
 
 	type agg struct {
 		branches map[string]bool
@@ -220,7 +256,7 @@ func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun,
 			continue
 		}
 		bot, soleBot := soleBotActor(a.actors)
-		if soleBot && greenOnDefault[id] {
+		if _, green := greenOnDefault[id]; soleBot && green {
 			continue
 		}
 		detail := "the same workflow fails on PRs from different branches, this is systemic, not the PRs' fault"
@@ -234,11 +270,22 @@ func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun,
 			Title:    fmt.Sprintf("%s: %s is failing across %d PRs", repo, a.latest.Name, len(a.branches)),
 			Detail:   detail,
 			URL:      a.latest.HTMLURL,
-			Key:      fmt.Sprintf("%s/%s/%d", repo, checkCrossPR, id),
+			Key:      workflowKey(repo, checkCrossPR, id),
 		})
 	}
 	sortFindings(findings)
 	return findings
+}
+
+// greenRuns returns the newest successful run of each workflow.
+func greenRuns(runs []workflowRun) map[int64]workflowRun {
+	green := map[int64]workflowRun{}
+	for _, r := range runs { // newest first
+		if _, seen := green[r.WorkflowID]; !seen && r.Status == "completed" && r.Conclusion == "success" {
+			green[r.WorkflowID] = r
+		}
+	}
+	return green
 }
 
 // soleBotActor reports whether every aggregated run came from one single
@@ -263,8 +310,9 @@ const (
 	onlyAutoMerged    = " author:app/dependabot author:app/github-actions"
 )
 
-// digestRepo runs the daily backlog and hygiene checks.
-func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, error) {
+// digestRepo runs the daily backlog and hygiene checks and returns the ones it
+// measured clean as healthy.
+func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Finding, map[string]string, error) {
 	var findings []Finding
 	full := org + "/" + repo
 
@@ -283,7 +331,7 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 		"twoWeeks":   "repo:" + full + " is:issue created:>=" + now.AddDate(0, 0, -14).Format("2006-01-02"),
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	openPRs := counts["openPRs"]
 	openIssues := counts["openIssues"]
@@ -365,10 +413,13 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 
 	workflows, err := g.listWorkflows(org, repo)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	healthy := map[string]string{}
 	for _, w := range workflows {
+		key := workflowKey(repo, checkDeadWorkflow, w.ID)
 		if w.State != "disabled_inactivity" {
+			healthy[key] = w.HTMLURL
 			continue
 		}
 		findings = append(findings, Finding{
@@ -378,12 +429,21 @@ func digestRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Fi
 			Title:    fmt.Sprintf("%s: %s was disabled by GitHub", repo, w.Name),
 			Detail:   "scheduled workflow disabled after 60 days of repo inactivity, re-enable it if it is still needed",
 			URL:      w.HTMLURL,
-			Key:      fmt.Sprintf("%s/%s/%d", repo, checkDeadWorkflow, w.ID),
+			Key:      key,
 		})
 	}
 
+	// No evidence link: the resolved post keeps the finding's own search URL.
+	// issue-spike stays out, its 24h window ends every spike by itself.
+	for _, c := range []string{checkPRBacklog, checkIssueBacklog, checkStalePRs, checkStuckBotPRs, checkUnansweredIssues} {
+		healthy[repo+"/"+c] = ""
+	}
+	for _, f := range findings {
+		delete(healthy, f.Key)
+	}
+
 	sortFindings(findings)
-	return findings, nil
+	return findings, healthy, nil
 }
 
 func sortFindings(fs []Finding) {

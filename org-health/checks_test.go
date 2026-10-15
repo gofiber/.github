@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -263,7 +265,7 @@ func TestScanRepoPagesTheBranchWindow(t *testing.T) {
 
 	gh := newGitHub("")
 	gh.baseURL = srv.URL
-	if _, err := scanRepo(gh, "gofiber", "storage", Thresholds{CrossPRMinPRs: 3, CrossPRWindowHours: 24}, testNow); err != nil {
+	if _, _, err := scanRepo(gh, "gofiber", "storage", Thresholds{CrossPRMinPRs: 3, CrossPRWindowHours: 24}, testNow); err != nil {
 		t.Fatal(err)
 	}
 	if branchPages != maxRunPages {
@@ -291,7 +293,7 @@ func TestDigestRepoStuckBotPRs(t *testing.T) {
 	gh := newGitHub("")
 	gh.baseURL = srv.URL
 	th := Thresholds{StalePRDays: 14, MaxStuckBotPRs: 2, UnansweredIssueDays: 14, IssueSpikeMinCount: 5, IssueSpikeFactor: 3}
-	got, err := digestRepo(gh, "gofiber", "multi-labeler", th, testNow)
+	got, _, err := digestRepo(gh, "gofiber", "multi-labeler", th, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +333,7 @@ func TestDigestRepoStuckBotPRs(t *testing.T) {
 	}
 
 	th.MaxStuckBotPRs = 3
-	if got, _ := digestRepo(gh, "gofiber", "multi-labeler", th, testNow); len(got) != 0 {
+	if got, _, _ := digestRepo(gh, "gofiber", "multi-labeler", th, testNow); len(got) != 0 {
 		t.Fatalf("at the threshold it must stay silent, got %+v", got)
 	}
 }
@@ -427,5 +429,131 @@ func TestFilterAlertedPerRepoCooldown(t *testing.T) {
 	}
 	if got := s.filterAlerted(f, cooldownFor, now.Add(2*time.Hour)); len(got) != 1 {
 		t.Fatal("storage's per-repo 1h cooldown must let it fire again after 2h")
+	}
+}
+
+// Vanishing is not proof of a fix: a branch failure also vanishes once it ages
+// past maxFailureAge, so only a green newest run resolves it.
+func TestScanHealthy(t *testing.T) {
+	green := run(3, 1, "main", "ccc", "push", "success")
+	green.HTMLURL = "https://github.com/gofiber/fiber/actions/runs/3"
+	runs := []workflowRun{
+		green,
+		run(2, 1, "main", "bbb", "push", "failure"),
+		run(5, 2, "main", "bbb", "push", "failure"),
+		run(4, 2, "main", "aaa", "push", "success"),
+		run(6, 3, "main", "bbb", "pull_request", "success"),
+	}
+	got := scanHealthy("fiber", runs, runs, nil, nil)
+	if got["fiber/branch-failure/1"] != green.HTMLURL || got["fiber/startup-failure/1"] != green.HTMLURL {
+		t.Fatalf("green newest run must prove both branch keys with its URL: %v", got)
+	}
+	if _, ok := got["fiber/branch-failure/2"]; ok {
+		t.Fatal("a workflow whose newest run is red is not healthy")
+	}
+	if _, ok := got["fiber/branch-failure/3"]; ok {
+		t.Fatal("a PR run is no default-branch signal")
+	}
+	if _, ok := got["fiber/cross-pr/1"]; !ok {
+		t.Fatal("cross-PR pattern gone and workflow green on the default branch must be healthy")
+	}
+	got = scanHealthy("fiber", runs, runs, nil, []Finding{{Key: "fiber/cross-pr/1"}})
+	if _, ok := got["fiber/cross-pr/1"]; ok {
+		t.Fatal("a cross-PR pattern that still fires is not healthy")
+	}
+	prFailure := run(7, 1, "feature", "ddd", "pull_request", "failure")
+	prFailure.CreatedAt = green.CreatedAt.Add(time.Minute)
+	if _, ok := scanHealthy("fiber", runs, runs, []workflowRun{prFailure}, nil)["fiber/cross-pr/1"]; ok {
+		t.Fatal("a green run older than the last PR failure proves nothing")
+	}
+	prFailure.CreatedAt = green.CreatedAt.Add(-time.Minute)
+	if _, ok := scanHealthy("fiber", runs, runs, []workflowRun{prFailure}, nil)["fiber/cross-pr/1"]; !ok {
+		t.Fatal("a green run after the last PR failure proves the pattern fixed")
+	}
+}
+
+func TestDigestRepoHealthy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			// a4 is stuckBots, see TestDigestRepoStuckBotPRs
+			io.WriteString(w, `{"data":{"a0":{"issueCount":0},"a1":{"issueCount":0},"a2":{"issueCount":0},"a3":{"issueCount":0},"a4":{"issueCount":3},"a5":{"issueCount":0},"a6":{"issueCount":0}}}`)
+			return
+		}
+		io.WriteString(w, `{"workflows":[{"id":7,"state":"active","html_url":"w7"},{"id":8,"state":"disabled_inactivity"}]}`)
+	}))
+	defer srv.Close()
+
+	gh := newGitHub("")
+	gh.baseURL = srv.URL
+	th := Thresholds{StalePRDays: 14, MaxStuckBotPRs: 2, UnansweredIssueDays: 14, IssueSpikeMinCount: 5, IssueSpikeFactor: 3}
+	_, healthy, err := digestRepo(gh, "gofiber", "multi-labeler", th, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []string{checkPRBacklog, checkIssueBacklog, checkStalePRs, checkUnansweredIssues} {
+		if _, ok := healthy["multi-labeler/"+c]; !ok {
+			t.Fatalf("%s is under its threshold and must be healthy: %v", c, healthy)
+		}
+	}
+	if _, ok := healthy["multi-labeler/"+checkStuckBotPRs]; ok {
+		t.Fatal("a check that fires is not healthy")
+	}
+	if _, ok := healthy["multi-labeler/"+checkIssueSpike]; ok {
+		t.Fatal("a spike ends with its window, that is no proof")
+	}
+	if healthy["multi-labeler/dead-workflow/7"] != "w7" {
+		t.Fatalf("an active workflow must be healthy with its URL: %v", healthy)
+	}
+	if _, ok := healthy["multi-labeler/dead-workflow/8"]; ok {
+		t.Fatal("a disabled workflow is not healthy")
+	}
+}
+
+func TestStateResolvedLifecycle(t *testing.T) {
+	s := &State{Alerted: map[string]time.Time{}, Open: map[string]Finding{}}
+	const72 := func(string) time.Duration { return 72 * time.Hour }
+	f := Finding{Repo: "fiber", Key: "fiber/branch-failure/1", Title: "fiber: Tests failed on main", URL: "red-run"}
+	s.markOpen(s.filterAlerted([]Finding{f}, const72, testNow))
+
+	if got := s.resolved(map[string]string{"fiber/branch-failure/2": "x"}); len(got) != 0 {
+		t.Fatalf("proof for another key must not resolve: %+v", got)
+	}
+	if got := s.resolved(map[string]string{f.Key: ""}); len(got) != 1 || got[0].URL != "red-run" {
+		t.Fatalf("without a proving run the finding keeps its own URL: %+v", got)
+	}
+	got := s.resolved(map[string]string{f.Key: "green-run"})
+	if len(got) != 1 || got[0].URL != "green-run" {
+		t.Fatalf("want the finding linked to the green run, got %+v", got)
+	}
+
+	s.close(got)
+	if len(s.Open) != 0 {
+		t.Fatalf("closed finding still open: %v", s.Open)
+	}
+	if len(s.filterAlerted([]Finding{f}, const72, testNow.Add(time.Hour))) != 1 {
+		t.Fatal("after a resolved post a relapse must alert inside the old cooldown")
+	}
+}
+
+func TestPruneDropsUntrackedOpenFindings(t *testing.T) {
+	s := &State{
+		Alerted: map[string]time.Time{"old": testNow.Add(-15 * 24 * time.Hour), "new": testNow},
+		Open:    map[string]Finding{"old": {}, "new": {}},
+	}
+	s.prune(testNow)
+	if _, ok := s.Open["old"]; ok || len(s.Open) != 1 {
+		t.Fatalf("open finding without a tracked alert must be pruned: %v", s.Open)
+	}
+}
+
+func TestLoadStateWithoutOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, []byte(`{"alerted":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := loadState(path)
+	s.markOpen([]Finding{{Key: "k"}}) // a nil map would panic here
+	if len(s.Open) != 1 {
+		t.Fatalf("got %v", s.Open)
 	}
 }

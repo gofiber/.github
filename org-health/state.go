@@ -11,10 +11,12 @@ import (
 // fires once and then stays silent for the cooldown.
 type State struct {
 	Alerted map[string]time.Time `json:"alerted"`
+	// Open holds the posted findings that no run has reported resolved yet.
+	Open map[string]Finding `json:"open"`
 }
 
 func loadState(path string) *State {
-	s := &State{Alerted: map[string]time.Time{}}
+	s := &State{Alerted: map[string]time.Time{}, Open: map[string]Finding{}}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return s // first run or cache miss, start empty
@@ -22,7 +24,43 @@ func loadState(path string) *State {
 	if err := json.Unmarshal(b, s); err != nil || s.Alerted == nil {
 		s.Alerted = map[string]time.Time{}
 	}
+	if s.Open == nil {
+		s.Open = map[string]Finding{}
+	}
 	return s
+}
+
+func (s *State) markOpen(findings []Finding) {
+	for _, f := range findings {
+		s.Open[f.Key] = f
+	}
+}
+
+// resolved returns the open findings that healthy proves fixed, linked to the
+// proving run where there is one.
+func (s *State) resolved(healthy map[string]string) []Finding {
+	var out []Finding
+	for key, f := range s.Open {
+		evidence, ok := healthy[key]
+		if !ok {
+			continue
+		}
+		if evidence != "" {
+			f.URL = evidence
+		}
+		out = append(out, f)
+	}
+	sortFindings(out)
+	return out
+}
+
+// close forgets resolved findings, cooldown included: the channel last said
+// fixed, so a relapse has to alert right away.
+func (s *State) close(findings []Finding) {
+	for _, f := range findings {
+		delete(s.Open, f.Key)
+		delete(s.Alerted, f.Key)
+	}
 }
 
 // filterAlerted drops findings whose key already fired within the cooldown
@@ -45,6 +83,12 @@ func (s *State) prune(now time.Time) {
 	for k, t := range s.Alerted {
 		if now.Sub(t) > 14*24*time.Hour {
 			delete(s.Alerted, k)
+		}
+	}
+	// still failing re-alerts every cooldown, so a missing alert means it stopped being tracked
+	for k := range s.Open {
+		if _, ok := s.Alerted[k]; !ok {
+			delete(s.Open, k)
 		}
 	}
 }

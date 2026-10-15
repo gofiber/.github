@@ -77,17 +77,36 @@ never match, so exceptions cannot accumulate silently. Check names:
   default-setup CodeQL) run as the `dynamic` event and are skipped. They are
   dependency problems reported in their own tab, not the repo's CI.
 - Failure findings are keyed by workflow, not by run, so a workflow that flaps
-  green/red alerts once per cooldown instead of once per flip.
+  green/red between two scans alerts once per cooldown instead of once per flip.
 - The backlog and review-debt checks skip the PRs that merge themselves
   (dependabot, github-actions); their count swings by ten within minutes of a
   batch merge and is not review debt. `stuck-bot-prs` counts exactly those
   instead, so both signals stay readable. PRs from any other bot (copilot,
   renovate) wait for a human like any PR and stay in the review-debt bucket.
 - Every finding key has a 72h cooldown (`cooldownHours`, overridable per repo),
-  persisted in `state.json` via actions/cache.
+  persisted in `state.json` via actions/cache. A resolved post (below) clears
+  it, so a relapse alerts at once; a workflow that flaps across scans alerts
+  once per flip then and belongs in `known-issues.json`.
 - The digest is a single message; scan alerts are batched into one message
   with at most 10 embeds.
 - Dry runs do not touch the state, so they never consume a cooldown.
+
+## Resolved posts
+
+A posted finding stays open in `state.json` until a later run of the same mode
+proves it fixed; then a green message strikes its title through. It takes
+proof, not absence, since a branch failure also drops out once it is older
+than 7 days:
+
+- branch failures and `startup-failure`: the newest default-branch run of the
+  workflow is green, linked in the post;
+- `cross-pr`: the pattern is gone and the workflow ran green on the default
+  branch after its last failing PR run;
+- digest checks: measured again and under the threshold, or the workflow is no
+  longer disabled for inactivity. `issue-spike` never resolves, its 24h window
+  ends every spike by itself.
+
+An open finding whose alert is older than 14 days is dropped without a post.
 
 ## Local testing
 
