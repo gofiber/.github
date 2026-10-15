@@ -56,7 +56,6 @@ func TestStripBulletEmoji(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := Parse(tc.in)
@@ -113,7 +112,6 @@ func TestStripConvCommitPrefix(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := Parse(tc.in)
@@ -132,8 +130,8 @@ func TestFilterBotContributors(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
-		bots []string
 		want string
+		bots []string
 	}{
 		{
 			name: "all bots removes the line",
@@ -172,7 +170,6 @@ func TestFilterBotContributors(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := Parse(tc.in)
@@ -308,7 +305,6 @@ func TestDropEmptySections(t *testing.T) {
 		},
 	}
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := Parse(tc.in)
@@ -453,7 +449,7 @@ func FuzzStripBulletEmoji(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(s)
 	}
-	f.Fuzz(func(t *testing.T, body string) {
+	f.Fuzz(func(_ *testing.T, body string) {
 		// Must never panic, regardless of input.
 		b := Parse(body)
 		b.StripBulletEmoji()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/http"
 	"net/url"
 	"sort"
@@ -84,7 +85,7 @@ func (g *gitHub) doRequest(method, fullURL, label string, body []byte) ([]byte, 
 			return nil, nil, err
 		}
 		data, _ := io.ReadAll(resp.Body) // fully drained so the connection is reused
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			return data, resp.Header, nil
 		}
@@ -133,11 +134,8 @@ func rateLimitWait(h http.Header) (time.Duration, bool) {
 	if h.Get("X-RateLimit-Remaining") == "0" {
 		if reset := strings.TrimSpace(h.Get("X-RateLimit-Reset")); reset != "" {
 			if ts, err := strconv.ParseInt(reset, 10, 64); err == nil {
-				wait := time.Until(time.Unix(ts, 0)) + time.Second
-				if wait < time.Second {
-					wait = time.Second // clock skew or window already reopened
-				}
-				return wait, true
+				// floor at 1s: clock skew or window already reopened
+				return max(time.Until(time.Unix(ts, 0))+time.Second, time.Second), true
 			}
 		}
 	}
@@ -220,9 +218,7 @@ const maxRunPages = 3
 func (g *gitHub) listRuns(org, repo string, query url.Values, notOlderThan time.Time) ([]workflowRun, error) {
 	const perPage = 100
 	q := url.Values{}
-	for k, v := range query {
-		q[k] = v
-	}
+	maps.Copy(q, query)
 	q.Set("per_page", strconv.Itoa(perPage))
 	var all []workflowRun
 	for page := 1; page <= maxRunPages; page++ {

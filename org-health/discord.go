@@ -69,7 +69,7 @@ func postFindings(webhook, mode, org string, findings []Finding) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("discord webhook: %s: %s", resp.Status, b)

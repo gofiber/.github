@@ -14,7 +14,7 @@
 package main
 
 import (
-	"flag"
+	"flag" //nolint:depguard // CLI entry point, the rule exists to keep flag in main.go
 	"fmt"
 	"io"
 	"os"

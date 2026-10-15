@@ -23,6 +23,7 @@ package cleanup
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -60,6 +61,10 @@ func isBot(login string, keywords []string) bool {
 
 // Options controls Apply.
 type Options struct {
+	// Warnings, if non-nil, receives human-readable notes such as "dropped
+	// duplicate #123 from Updates (kept in Fixes)". Callers typically hand
+	// these to os.Stderr.
+	Warnings *[]string
 	// BotKeywords is a list of keywords used to identify bot accounts.
 	// A login is a bot if it contains "[bot]" OR any of these keywords
 	// (case-insensitive substring match). Merged with DefaultBotKeywords.
@@ -67,10 +72,6 @@ type Options struct {
 	// Dedupe, when true, removes duplicate PR references (#123) that appear in
 	// multiple sections. The occurrence in the highest-priority section wins.
 	Dedupe bool
-	// Warnings, if non-nil, receives human-readable notes such as "dropped
-	// duplicate #123 from Updates (kept in Fixes)". Callers typically hand
-	// these to os.Stderr.
-	Warnings *[]string
 }
 
 // Section is a single "## Heading" block in the release body.
@@ -302,13 +303,7 @@ func (b *Body) DropEmptySections(warn func(string)) {
 	kept := b.Sections[:0]
 	dropped := false
 	for _, sec := range b.Sections {
-		hasBullet := false
-		for _, ln := range sec.Lines {
-			if bulletRe.MatchString(ln) {
-				hasBullet = true
-				break
-			}
-		}
+		hasBullet := slices.ContainsFunc(sec.Lines, bulletRe.MatchString)
 		if !hasBullet {
 			if warn != nil {
 				warn(fmt.Sprintf("dropped empty section %q", strings.TrimSpace(sec.Heading)))

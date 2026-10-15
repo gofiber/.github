@@ -11,7 +11,7 @@ on:
         description: 'golangci-lint version to use.'
         required: false
         type: string
-        default: 'v2.6.2'
+        default: 'v2.14.0'
       golangci-lint-args:
         description: 'Additional args for golangci-lint (e.g. "--tests=false --timeout=5m").'
         required: false
