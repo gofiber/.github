@@ -10,13 +10,20 @@ on:
         description: 'Newline-separated list of repos to trigger.'
         required: true
         type: string
+      release-tag:
+        description: >
+          Release tag to wait for on proxy.golang.org (e.g. v3.6.1 or s3/v2.7.3), its module
+          derived from the caller repo. Empty falls back to delay-minutes.
+        required: false
+        type: string
+        default: ''
       delay-minutes:
-        description: 'Minutes to wait for registries to index the new release.'
+        description: 'Minutes to wait for registries to index the new release when no release-tag is given.'
         required: false
         type: number
         default: 10
       wait-timeout-minutes:
-        description: 'Job timeout for the wait job. Raise together with delay-minutes.'
+        description: 'Job timeout for the wait job, also the limit for the release-tag wait. Raise together with delay-minutes.'
         required: false
         type: number
         default: 30
@@ -41,10 +48,37 @@ jobs:
       matrix: ${{ steps.parse.outputs.matrix }}
     steps:
       - name: Wait for registries to index
-        if: inputs.delay-minutes > 0 && !inputs.skip-wait
+        if: inputs.release-tag == '' && inputs.delay-minutes > 0 && !inputs.skip-wait
         run: |
           echo "⏳ Waiting ${{ inputs.delay-minutes }} minute(s) for registries to index..."
           sleep $(( ${{ inputs.delay-minutes }} * 60 ))
+
+      - name: Wait for the Go proxy to list the release
+        if: inputs.release-tag != '' && !inputs.skip-wait
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.release-tag }}
+        run: |
+          # tag s3/v2.7.3 is module github.com/<repo>/s3/v2 at v2.7.3
+          version="${TAG##*/}"
+          if [[ ! "$version" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::release-tag '${TAG}' does not end in a semver version"
+            exit 1
+          fi
+          major="${BASH_REMATCH[1]}"
+          module="github.com/${REPO}"
+          if [[ "$TAG" == */* ]]; then module="${module}/${TAG%/*}"; fi
+          if (( major >= 2 )); then module="${module}/v${major}"; fi
+
+          echo "⏳ Waiting for proxy.golang.org to list ${module}@${version}..."
+          # fetching the version makes the proxy index it now; Dependabot only reads the list
+          until curl -sf -m 30 "https://proxy.golang.org/${module}/@v/${version}.info" > /dev/null &&
+            curl -sf -m 30 "https://proxy.golang.org/${module}/@v/list" | grep -qxF "$version"; do
+            sleep 30
+          done
+          echo "✅ ${module}@${version} is listed"
+          # the list is served with max-age=60, so other CDN edges may still hold the old one
+          sleep 60
 
       - name: Build matrix
         id: parse
