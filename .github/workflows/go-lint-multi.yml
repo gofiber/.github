@@ -140,6 +140,8 @@ jobs:
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         env:
           GOWORK: 'off'
+          # setup-go pins the module's Go; golangci-lint may need a newer one to build
+          GOTOOLCHAIN: auto
         with:
           version: ${{ inputs.golangci-lint-version }}
           args: ${{ inputs.golangci-lint-args }}
