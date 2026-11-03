@@ -237,6 +237,16 @@ func (g *gitHub) listRuns(org, repo string, query url.Values, notOlderThan time.
 	return all, nil
 }
 
+// ranJobs reports whether a run started any job. A fork PR run still awaiting
+// approval when its PR is merged ends as "failure" without one.
+func (g *gitHub) ranJobs(org, repo string, runID int64) (bool, error) {
+	var out struct {
+		TotalCount int `json:"total_count"`
+	}
+	err := g.get(fmt.Sprintf("/repos/%s/%s/actions/runs/%d/jobs", org, repo, runID), url.Values{"per_page": {"1"}}, &out)
+	return out.TotalCount > 0, err
+}
+
 func (g *gitHub) listWorkflows(org, repo string) ([]workflowInfo, error) {
 	var out struct {
 		Workflows []workflowInfo `json:"workflows"`

@@ -76,6 +76,9 @@ never match, so exceptions cannot accumulate silently. Check names:
 - GitHub's own managed jobs (dependabot updates, dependency graph,
   default-setup CodeQL) run as the `dynamic` event and are skipped. They are
   dependency problems reported in their own tab, not the repo's CI.
+- Cross-PR only counts PR failures after the workflow's newest green
+  default-branch run, which proves the environment healthy, and skips runs
+  that never started a job (fork PRs merged before their runs were approved).
 - Failure findings are keyed by workflow, not by run, so a workflow that flaps
   green/red between two scans alerts once per cooldown instead of once per flip.
 - The backlog and review-debt checks skip the PRs that merge themselves

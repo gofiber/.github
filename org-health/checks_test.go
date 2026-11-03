@@ -190,13 +190,22 @@ func actorRun(id, workflowID int64, branch, actor string) workflowRun {
 	return r
 }
 
+func crossPR(t *testing.T, prRuns, branchRuns []workflowRun) []Finding {
+	t.Helper()
+	got, err := detectCrossPRFailures("storage", prRuns, branchRuns, 3, func(workflowRun) (bool, error) { return true, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 func TestDetectCrossPRFailures(t *testing.T) {
 	threeBranches := []workflowRun{
 		run(3, 7, "feat-c", "ccc", "pull_request", "failure"),
 		run(2, 7, "feat-b", "bbb", "pull_request", "failure"),
 		run(1, 7, "feat-a", "aaa", "pull_request", "failure"),
 	}
-	if got := detectCrossPRFailures("storage", threeBranches, nil, 3); len(got) != 1 {
+	if got := crossPR(t, threeBranches, nil); len(got) != 1 {
 		t.Fatalf("3 distinct branches: got %d findings, want 1", len(got))
 	}
 
@@ -205,12 +214,12 @@ func TestDetectCrossPRFailures(t *testing.T) {
 		run(2, 7, "feat-a", "a2", "pull_request", "failure"),
 		run(1, 7, "feat-a", "a1", "pull_request", "failure"),
 	}
-	if got := detectCrossPRFailures("storage", onePRRetried, nil, 3); len(got) != 0 {
+	if got := crossPR(t, onePRRetried, nil); len(got) != 0 {
 		t.Fatalf("one PR retried: got %d findings, want 0", len(got))
 	}
 
 	twoBranches := threeBranches[1:]
-	if got := detectCrossPRFailures("storage", twoBranches, nil, 3); len(got) != 0 {
+	if got := crossPR(t, twoBranches, nil); len(got) != 0 {
 		t.Fatalf("below threshold: got %d findings, want 0", len(got))
 	}
 }
@@ -224,25 +233,77 @@ func TestDetectCrossPRFailuresBotSuppression(t *testing.T) {
 		actorRun(1, 7, "dependabot/c", "dependabot[bot]"),
 	}
 	greenMain := []workflowRun{run(10, 7, "main", "mmm", "push", "success")}
+	greenMain[0].CreatedAt = testNow.Add(-time.Hour)
 	redMain := []workflowRun{run(10, 7, "main", "mmm", "push", "failure")}
 	otherWorkflowGreen := []workflowRun{run(10, 8, "main", "mmm", "push", "success")}
 	mixedActors := append([]workflowRun{actorRun(4, 7, "feat-x", "human")}, botPRs...)
 
-	if got := detectCrossPRFailures("storage", botPRs, greenMain, 3); len(got) != 0 {
+	if got := crossPR(t, botPRs, greenMain); len(got) != 0 {
 		t.Fatalf("sole bot actor with green default branch: got %d findings, want 0", len(got))
 	}
-	got := detectCrossPRFailures("storage", botPRs, redMain, 3)
+	got := crossPR(t, botPRs, redMain)
 	if len(got) != 1 {
 		t.Fatalf("sole bot actor without green default branch: got %d findings, want 1", len(got))
 	}
 	if !strings.Contains(got[0].Detail, "dependabot[bot]") {
 		t.Fatalf("finding should name the bot, got detail %q", got[0].Detail)
 	}
-	if got := detectCrossPRFailures("storage", botPRs, otherWorkflowGreen, 3); len(got) != 1 {
+	if got := crossPR(t, botPRs, otherWorkflowGreen); len(got) != 1 {
 		t.Fatalf("green run of a different workflow must not suppress: got %d findings, want 1", len(got))
 	}
-	if got := detectCrossPRFailures("storage", mixedActors, greenMain, 3); len(got) != 1 {
+	if got := crossPR(t, mixedActors, greenMain); len(got) != 1 {
 		t.Fatalf("mixed actors stay systemic despite green default branch: got %d findings, want 1", len(got))
+	}
+}
+
+// fiber 2026-11-03: compile errors in unrelated PRs reached the threshold
+// while the default branch had run green after them.
+func TestDetectCrossPRFailuresCountsOnlyAfterGreenDefault(t *testing.T) {
+	green := []workflowRun{run(10, 7, "main", "mmm", "push", "success")}
+	green[0].CreatedAt = testNow.Add(-time.Hour)
+	old := func(r workflowRun) workflowRun {
+		r.CreatedAt = testNow.Add(-2 * time.Hour)
+		return r
+	}
+	runs := []workflowRun{
+		run(4, 7, "feat-d", "ddd", "pull_request", "failure"),
+		run(3, 7, "feat-c", "ccc", "pull_request", "failure"),
+		old(run(2, 7, "feat-b", "bbb", "pull_request", "failure")),
+		old(run(1, 7, "feat-a", "aaa", "pull_request", "failure")),
+	}
+	if got := crossPR(t, runs, green); len(got) != 0 {
+		t.Fatalf("failures before the green default-branch run must not count: got %+v", got)
+	}
+	runs[2].CreatedAt = testNow
+	if got := crossPR(t, runs, green); len(got) != 1 {
+		t.Fatalf("3 branches failing after the green run: got %d findings, want 1", len(got))
+	}
+}
+
+// fiber 2026-11-03: fork PRs merged before anyone approved their runs left
+// "failure" runs without a single job, enough to fake the pattern.
+func TestDetectCrossPRFailuresIgnoresRunsWithoutJobs(t *testing.T) {
+	runs := []workflowRun{
+		run(5, 7, "fork-c", "c2", "pull_request", "failure"),
+		run(4, 7, "fork-b", "bbb", "pull_request", "failure"),
+		run(3, 7, "feat-a", "aaa", "pull_request", "failure"),
+		run(2, 7, "fork-c", "c1", "pull_request", "failure"),
+	}
+	noJobs := map[int64]bool{5: true, 4: true}
+	ran := func(r workflowRun) (bool, error) { return !noJobs[r.ID], nil }
+	if got, _ := detectCrossPRFailures("fiber", runs, nil, 3, ran); len(got) != 0 {
+		t.Fatalf("a branch without a started run is no PR failure: got %+v", got)
+	}
+	delete(noJobs, 4)
+	got, _ := detectCrossPRFailures("fiber", runs, nil, 3, ran)
+	if len(got) != 1 || !strings.Contains(got[0].Title, "across 3 PRs") {
+		t.Fatalf("an older started run still counts its branch: got %+v", got)
+	}
+
+	var lookups int
+	counting := func(workflowRun) (bool, error) { lookups++; return true, nil }
+	if _, err := detectCrossPRFailures("fiber", runs[1:3], nil, 3, counting); err != nil || lookups != 0 {
+		t.Fatalf("below the threshold no jobs lookup is needed: %d lookups, err %v", lookups, err)
 	}
 }
 

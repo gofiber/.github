@@ -69,7 +69,12 @@ func scanRepo(g *gitHub, org, repo string, th Thresholds, now time.Time) ([]Find
 			recentBranchRuns = append(recentBranchRuns, r)
 		}
 	}
-	findings = append(findings, detectCrossPRFailures(repo, prRuns, recentBranchRuns, th.CrossPRMinPRs)...)
+	ran := func(r workflowRun) (bool, error) { return g.ranJobs(org, repo, r.ID) }
+	crossPR, err := detectCrossPRFailures(repo, prRuns, recentBranchRuns, th.CrossPRMinPRs, ran)
+	if err != nil {
+		return nil, nil, err
+	}
+	findings = append(findings, crossPR...)
 	return findings, scanHealthy(repo, branchRuns, recentBranchRuns, prRuns, findings), nil
 }
 
@@ -221,6 +226,11 @@ func branchSignal(runs []workflowRun) map[int64][]workflowRun {
 // fault, so the shared infrastructure is. A single PR failing repeatedly
 // stays below the threshold by design: that is the PR's own problem.
 //
+// Only failures after the workflow's newest green default-branch run count:
+// that run proves the environment healthy, so older PR failures are the PRs'
+// own (fiber 2026-11-03: compile errors in unrelated PRs reached the threshold).
+// Runs that never started a job do not count either, see ranJobs.
+//
 // Exception (reference case D): grouped dependency bumps open many PRs at
 // once that all fail on their own breaking change, which looks systemic
 // but is not. When every failing run was opened by the same bot AND the
@@ -228,34 +238,59 @@ func branchSignal(runs []workflowRun) map[int64][]workflowRun {
 // (the environment is provably healthy), the finding is suppressed. With
 // no green default-branch run the finding still fires, annotated with the
 // bot name so the reader can judge.
-func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun, minPRs int) []Finding {
+func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun, minPRs int, ran func(workflowRun) (bool, error)) ([]Finding, error) {
 	greenOnDefault := greenRuns(defaultBranchRuns)
 
-	type agg struct {
-		branches map[string]bool
-		actors   map[string]bool
-		latest   workflowRun
-	}
-	byWorkflow := map[int64]*agg{}
+	byWorkflow := map[int64][]workflowRun{}
 	for _, r := range prRuns { // newest first
 		if r.Conclusion != "failure" {
 			continue
 		}
-		a := byWorkflow[r.WorkflowID]
-		if a == nil {
-			a = &agg{branches: map[string]bool{}, actors: map[string]bool{}, latest: r}
-			byWorkflow[r.WorkflowID] = a
+		if green, ok := greenOnDefault[r.WorkflowID]; ok && !r.CreatedAt.After(green.CreatedAt) {
+			continue
 		}
-		a.branches[r.HeadBranch] = true
-		a.actors[r.Actor.Login] = true
+		byWorkflow[r.WorkflowID] = append(byWorkflow[r.WorkflowID], r)
 	}
 
 	var findings []Finding
-	for id, a := range byWorkflow {
-		if len(a.branches) < minPRs {
+	for id, runs := range byWorkflow {
+		all := map[string]bool{}
+		for _, r := range runs {
+			all[r.HeadBranch] = true
+		}
+		// The jobs lookup costs a request per run, so only a workflow that can
+		// still reach the threshold pays for it.
+		if len(all) < minPRs {
 			continue
 		}
-		bot, soleBot := soleBotActor(a.actors)
+		branches := map[string]bool{}
+		var latest workflowRun
+		for _, r := range runs {
+			if branches[r.HeadBranch] {
+				continue
+			}
+			ok, err := ran(r)
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				continue
+			}
+			if len(branches) == 0 {
+				latest = r
+			}
+			branches[r.HeadBranch] = true
+		}
+		if len(branches) < minPRs {
+			continue
+		}
+		actors := map[string]bool{}
+		for _, r := range runs {
+			if branches[r.HeadBranch] {
+				actors[r.Actor.Login] = true
+			}
+		}
+		bot, soleBot := soleBotActor(actors)
 		if _, green := greenOnDefault[id]; soleBot && green {
 			continue
 		}
@@ -266,15 +301,15 @@ func detectCrossPRFailures(repo string, prRuns, defaultBranchRuns []workflowRun,
 		findings = append(findings, Finding{
 			Repo:     repo,
 			Check:    checkCrossPR,
-			Workflow: a.latest.Name,
-			Title:    fmt.Sprintf("%s: %s is failing across %d PRs", repo, a.latest.Name, len(a.branches)),
+			Workflow: latest.Name,
+			Title:    fmt.Sprintf("%s: %s is failing across %d PRs", repo, latest.Name, len(branches)),
 			Detail:   detail,
-			URL:      a.latest.HTMLURL,
+			URL:      latest.HTMLURL,
 			Key:      workflowKey(repo, checkCrossPR, id),
 		})
 	}
 	sortFindings(findings)
-	return findings
+	return findings, nil
 }
 
 // greenRuns returns the newest successful run of each workflow.

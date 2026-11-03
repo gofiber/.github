@@ -61,6 +61,27 @@ func TestDefaultBranchReusesTheRepoListing(t *testing.T) {
 	}
 }
 
+// A misread count would silently turn every PR failure into a jobless run.
+func TestRanJobs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/actions/runs/1/jobs") {
+			io.WriteString(w, `{"total_count":0,"jobs":[]}`)
+			return
+		}
+		io.WriteString(w, `{"total_count":4,"jobs":[{"id":9}]}`)
+	}))
+	defer srv.Close()
+
+	gh := newGitHub("")
+	gh.baseURL = srv.URL
+	if ok, err := gh.ranJobs("gofiber", "fiber", 1); err != nil || ok {
+		t.Fatalf("run without jobs: got %v, %v", ok, err)
+	}
+	if ok, err := gh.ranJobs("gofiber", "fiber", 2); err != nil || !ok {
+		t.Fatalf("run with jobs: got %v, %v", ok, err)
+	}
+}
+
 func TestListRunsPaginates(t *testing.T) {
 	body := runsPage
 	cutoff := testNow.Add(-24 * time.Hour)
