@@ -18,10 +18,18 @@ permissions:
 jobs:
   trigger:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     permissions:
       contents: write
     steps:
+      # release-plan.yml hooks dispatch right after publishing, before the proxy lists the tag
+      - name: Wait for the Go proxy to list the release
+        if: github.event.client_payload.tag
+        uses: gofiber/.github/.github/actions/wait-for-go-proxy@main
+        with:
+          tag: ${{ github.event.client_payload.tag }}
+          repo: ${{ github.event.client_payload.source_repository || github.repository }}
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ secrets.push-token || github.token }}
@@ -45,4 +53,9 @@ jobs:
           fi
 
           git commit -am "$msg"
-          git push
+          # a merge can land between checkout and push; an identical toggle rebases away
+          for _ in 1 2 3; do
+            git push && exit 0
+            git pull --rebase
+          done
+          exit 1

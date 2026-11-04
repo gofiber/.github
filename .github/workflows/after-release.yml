@@ -55,30 +55,9 @@ jobs:
 
       - name: Wait for the Go proxy to list the release
         if: inputs.release-tag != '' && !inputs.skip-wait
-        env:
-          REPO: ${{ github.repository }}
-          TAG: ${{ inputs.release-tag }}
-        run: |
-          # tag s3/v2.7.3 is module github.com/<repo>/s3/v2 at v2.7.3
-          version="${TAG##*/}"
-          if [[ ! "$version" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+ ]]; then
-            echo "::error::release-tag '${TAG}' does not end in a semver version"
-            exit 1
-          fi
-          major="${BASH_REMATCH[1]}"
-          module="github.com/${REPO}"
-          if [[ "$TAG" == */* ]]; then module="${module}/${TAG%/*}"; fi
-          if (( major >= 2 )); then module="${module}/v${major}"; fi
-
-          echo "⏳ Waiting for proxy.golang.org to list ${module}@${version}..."
-          # fetching the version makes the proxy index it now; Dependabot only reads the list
-          until curl -sf -m 30 "https://proxy.golang.org/${module}/@v/${version}.info" > /dev/null &&
-            curl -sf -m 30 "https://proxy.golang.org/${module}/@v/list" | grep -qxF "$version"; do
-            sleep 30
-          done
-          echo "✅ ${module}@${version} is listed"
-          # the list is served with max-age=60, so other CDN edges may still hold the old one
-          sleep 60
+        uses: gofiber/.github/.github/actions/wait-for-go-proxy@main
+        with:
+          tag: ${{ inputs.release-tag }}
 
       - name: Build matrix
         id: parse
