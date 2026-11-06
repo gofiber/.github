@@ -42,10 +42,10 @@ def run(base, current, previous=None, retested=None, extra=()):
     """Run the script end to end: exit code, report and the key=value lines it printed."""
     with tempfile.TemporaryDirectory() as tmp:
         paths = {name: f"{tmp}/{name}" for name in ("base", "current", "out", "previous", "retested")}
-        pathlib.Path(paths["base"]).write_text(base, encoding="utf-8")
         pathlib.Path(paths["current"]).write_text(current, encoding="utf-8")
-        argv = ["--base", paths["base"], "--current", paths["current"], "--out", paths["out"]]
-        for name, text in (("previous", previous), ("retested", retested)):
+        # an empty workdir keeps the marker scan off whatever directory the suite runs in
+        argv = ["--current", paths["current"], "--out", paths["out"], "--workdir", tmp]
+        for name, text in (("base", base), ("previous", previous), ("retested", retested)):
             if text is not None:
                 pathlib.Path(paths[name]).write_text(text, encoding="utf-8")
                 argv += [f"--{name}", paths[name]]
@@ -53,7 +53,8 @@ def run(base, current, previous=None, retested=None, extra=()):
         with contextlib.redirect_stdout(printed):
             code = compare.main(argv + list(extra))
         outputs = dict(line.split("=", 1) for line in printed.getvalue().splitlines())
-        return code, pathlib.Path(paths["out"]).read_text(encoding="utf-8"), outputs
+        out = pathlib.Path(paths["out"])
+        return code, out.read_text(encoding="utf-8") if out.exists() else "", outputs
 
 
 def plan(base, current, previous=None):
@@ -845,6 +846,94 @@ def test_short_or_missing_history_changes_nothing():
     assert outputs["regressed"] == "true", outputs
     _, _, outputs = run_history(base, bench(BenchmarkX="160 ns/op"), "garbage, not json")
     assert outputs["regressed"] == "true", outputs
+
+
+def write_module(tmp, sources):
+    """A module `p` under tmp whose test files carry the given {path: Go source}."""
+    pathlib.Path(f"{tmp}/go.mod").write_text("module p\n", encoding="utf-8")
+    for path, source in sources.items():
+        target = pathlib.Path(tmp, path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+
+
+def run_marked(base, current, sources, hist=None):
+    with tempfile.TemporaryDirectory() as tmp:
+        write_module(tmp, sources)
+        extra = ["--workdir", tmp]
+        if hist is not None:
+            pathlib.Path(f"{tmp}/history.js").write_text(hist, encoding="utf-8")
+            extra += ["--history", f"{tmp}/history.js"]
+        return run(base, current, extra=extra)
+
+
+MARKED = """package p
+
+// BenchmarkX parses.
+//
+// benchmark:threshold 300% ^invalid$
+func BenchmarkX(b *testing.B) {}
+"""
+
+
+def test_a_threshold_marker_covers_only_its_own_benchmark():
+    # GenericParseTypeInput*/invalid: too new for a history band, bimodal ~90 or ~200 ns/op
+    base = bench(**{
+        "BenchmarkX/invalid": "200 ns/op\t48 B/op\t1 allocs/op", "BenchmarkX/valid": "100 ns/op",
+        "BenchmarkY/invalid": "200 ns/op",
+    })
+    current = bench(**{
+        "BenchmarkX/invalid": "90 ns/op\t96 B/op\t2 allocs/op", "BenchmarkX/valid": "40 ns/op",
+        "BenchmarkY/invalid": "90 ns/op",
+    })
+    # a subpackage reads its own markers, and the same name there is a different benchmark
+    other = MARKED.replace("package p", "package sub").replace("BenchmarkX", "BenchmarkY")
+    other += MARKED.replace("package p", "").replace("BenchmarkX", "BenchmarkW")
+    sub = "pkg: p/sub\nBenchmarkW/invalid-4\t10\t{} ns/op\n"
+    sources = {"x_test.go": MARKED, "sub/y_test.go": other}
+    code, report, outputs = run_marked(base + sub.format(200), current + sub.format(90), sources)
+    rows = {line.split("`")[1]: line for line in report.splitlines() if line.startswith("| `")}
+    assert code == 1, report
+    # a declared floor is not history: noise=0 still says the bands are missing
+    assert outputs["noise"] == "0" and "noise-aware thresholds" not in report, (outputs, report)
+    assert "ns/op" not in rows["BenchmarkX/invalid"], report
+    assert "48 → 96 B/op" in rows["BenchmarkX/invalid"] and "1 → 2 allocs/op" in rows["BenchmarkX/invalid"], report
+    assert "100 → 40 ns/op" in rows["BenchmarkX/valid"], report
+    assert "200 → 90 ns/op" in rows["BenchmarkY/invalid"] and "BenchmarkW/invalid" not in rows, report
+    # beyond the declared floor it still fails the gate
+    slower = bench(**{"BenchmarkX/invalid": "700 ns/op", "BenchmarkX/valid": "100 ns/op", "BenchmarkY/invalid": "200 ns/op"})
+    _, report, outputs = run_marked(base, slower, {"x_test.go": MARKED})
+    assert outputs["regressed"] == "true" and "200 → 700 ns/op" in report, report
+
+
+def test_a_threshold_marker_never_lowers_the_bar():
+    base, current = bench(BenchmarkX="100 ns/op"), bench(BenchmarkX="130 ns/op")
+    _, _, outputs = run_marked(base, current, {"x_test.go": MARKED.replace("300% ^invalid$", "110%")})
+    assert outputs["significant"] == "false", outputs
+    # nor below the band the history already measured for it
+    wobbly = history({"BenchmarkX": [100, 160, 95, 170, 105, 165, 98, 175, 102, 168]})
+    sources = {"x_test.go": MARKED.replace("300% ^invalid$", "120%")}
+    _, _, outputs = run_marked(base, bench(BenchmarkX="165 ns/op"), sources, wobbly)
+    assert outputs["regressed"] == "false", outputs
+
+
+def test_a_misplaced_or_malformed_threshold_marker_fails_the_job():
+    base = bench(BenchmarkX="100 ns/op")
+    for bad in (
+        MARKED.replace("300%", "lots"),
+        MARKED.replace("300%", "100%"),
+        MARKED.replace("^invalid$", "[invalid"),
+        MARKED.replace("^invalid$", "a b"),
+        MARKED.replace("\nfunc BenchmarkX", "\n\nfunc BenchmarkX"),
+        MARKED.replace("func BenchmarkX", "func helperX"),
+        MARKED.split("func")[0],
+    ):
+        # no baseline (base=None) must not let a broken marker pass either
+        for side in (base, None):
+            with contextlib.redirect_stderr(io.StringIO()) as errors:
+                code, _, _ = run_marked(side, base, {"x_test.go": bad})
+            # pointing at the marker, not at whatever line gave it away
+            assert code == 2 and "x_test.go:5:" in errors.getvalue(), (bad, errors.getvalue())
 
 
 def test_a_wobbly_reported_benchmark_does_not_go_stale_on_its_own_noise():

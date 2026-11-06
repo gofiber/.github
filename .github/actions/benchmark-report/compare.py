@@ -79,6 +79,10 @@ NOISE_QUANTILE = 0.95
 NOISE_MIN_PAIRS = 5
 NOISE_WINDOW = 16
 NOISE_WINDOW_MIN = 8
+# `// benchmark:threshold 300% [sub-benchmark regex]` in a benchmark's doc comment
+# declares a floor for what its history does not show yet
+MARKER_RE = re.compile(r"^//\s*benchmark:threshold\b(.*)$")
+BENCH_FUNC_RE = re.compile(r"^func\s+(Benchmark\w*)\s*\(")
 
 Key = namedtuple("Key", "pkg name unit")
 Change = namedtuple("Change", "key base current ratio")
@@ -344,6 +348,75 @@ def read_history(path):
     return wobble
 
 
+def owning_module(pkg, known):
+    """The module of `known` with the longest path that contains pkg, or None."""
+    return max((mod for mod in known if pkg == mod or pkg.startswith(mod + "/")), key=len, default=None)
+
+
+def parse_marker(where, args):
+    """(sub-benchmark pattern or None, factor) of one `benchmark:threshold` marker."""
+    fields = args.split()
+    try:
+        if not 1 <= len(fields) <= 2:
+            raise ValueError("expected '// benchmark:threshold <threshold> [sub-benchmark regex]'")
+        bar = factor(fields[0])
+        if not bar > 1:
+            raise ValueError(f"threshold must be above 100%, got {fields[0]}")
+        return (re.compile(fields[1]) if len(fields) == 2 else None), bar
+    except (ValueError, re.error) as err:
+        raise ValueError(f"{where}: {err}") from err
+
+
+def file_markers(path):
+    """(benchmark function, [(sub pattern, factor)]) for each marked benchmark of one file."""
+    pending, where = [], ""
+    misplaced = "benchmark:threshold must sit in the doc comment of a benchmark"
+    with open(path, encoding="utf-8") as handle:
+        for number, line in enumerate(handle, 1):
+            line = line.strip()
+            marker = MARKER_RE.match(line)
+            if marker:
+                where = f"{path}:{number}"
+                pending.append(parse_marker(where, marker.group(1)))
+            elif pending and not line.startswith("//"):
+                func = BENCH_FUNC_RE.match(line)
+                if not func:
+                    raise ValueError(f"{where}: {misplaced}")
+                yield func.group(1), pending
+                pending = []
+    if pending:
+        raise ValueError(f"{where}: {misplaced}")
+
+
+def threshold_markers(workdir, packages):
+    """{(pkg, benchmark function): [(sub pattern, factor)]} from the test files of the given packages."""
+    known = modules(workdir)
+    markers = {}
+    for pkg in sorted(packages):
+        mod = owning_module(pkg, known)
+        if mod is None:
+            continue
+        directory = os.path.join(workdir, known[mod], pkg[len(mod) + 1:])
+        for path in sorted(glob.glob(os.path.join(directory, "*_test.go"))):
+            for function, rules in file_markers(path):
+                markers.setdefault((pkg, function), []).extend(rules)
+    return markers
+
+
+def apply_markers(noise, keys, markers):
+    """Raise the noise floor of marked benchmarks so bars() yields at least their threshold.
+
+    Timing units only: B/op and allocs/op are exact, a new allocation must stay visible.
+    """
+    for key in keys:
+        if key.unit in ("B/op", "allocs/op"):
+            continue
+        function, _, sub = key.name.partition("/")
+        for pattern, bar in markers.get((key.pkg, function), ()):
+            if pattern is None or (sub and pattern.search(sub)):
+                noise[key] = max(noise.get(key, 0), bar / NOISE_MARGIN)
+
+
 def strength(value, improved):
     """How much better or worse, as a factor of at least 1 whichever way it went."""
     if improved:
@@ -587,11 +660,7 @@ def write_plan(path, keys, workdir):
         known = modules(workdir)
         groups = {}
         for pkg in sorted({pkg for pkg, _ in named}):
-            owner = max(
-                (mod for mod in known if pkg == mod or pkg.startswith(mod + "/")),
-                key=len,
-                default=None,
-            )
+            owner = owning_module(pkg, known)
             if owner:
                 groups.setdefault(known[owner], []).append(pkg)
         if not groups:
@@ -714,6 +783,12 @@ def main(argv=None):
         # exit 1 is regressions, a broken run must not pass for a clean one
         print(f"no benchmark results in {args.current}", file=sys.stderr)
         return 2
+    # before the baseline lookup, so a broken marker fails even a run with nothing to compare
+    try:
+        markers = threshold_markers(args.workdir, {key.pkg for key in current})
+    except ValueError as err:
+        print(f"::error::{err}", file=sys.stderr)
+        return 2
 
     baseline_sha = args.baseline_sha
     if args.base:
@@ -728,6 +803,9 @@ def main(argv=None):
     noise = read_history(args.history) if args.history else {}
     base = align_packages(base, current)
     noise = align_packages(noise, current)
+    # counted before the markers join, so noise=0 still means the history is missing
+    measured = len(noise)
+    apply_markers(noise, current, markers)
     warn_vanished(base, current)
 
     worse, better = compare(base, current, args.threshold, improve_threshold, args.min_ns, noise)
@@ -854,7 +932,7 @@ def main(argv=None):
         notes.append(f"⚠️ {duplicates} measured twice")
     if retest_note:
         notes.append(retest_note)
-    if noise:
+    if measured:
         notes.append("noise-aware thresholds")
     if args.hardware:
         notes.append(args.hardware)
@@ -877,7 +955,7 @@ def main(argv=None):
         ("significant", "true" if worse or better else "false"),
         ("changed", "true" if changed else "false"),
         # visible in the step log: an empty noise map means flat thresholds
-        ("noise", len(noise)),
+        ("noise", measured),
     ):
         print(f"{key}={value}")
     return 1 if worse else 0

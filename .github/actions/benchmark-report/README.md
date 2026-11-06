@@ -107,6 +107,21 @@ against their own history, and re-comparing those main-vs-main runs with the
 bands yields zero findings. Fetched best effort from gh-pages; without it, the
 flat thresholds stand (`noise=0` in the step log).
 
+A band needs at least six published runs, so a new benchmark is judged by the
+flat threshold until then. A benchmark that is known to wobble declares its floor
+in its own doc comment, read from the checked-out sources:
+
+```go
+// benchmark:threshold 300% ^invalid$
+func Benchmark_GenericParseTypeInputInt(b *testing.B) {
+```
+
+The optional regex selects sub-benchmarks; without it the whole function is
+covered. The floor only raises the bar of timing units, so a new allocation in
+B/op or allocs/op still reports at the normal threshold. Only the test files of
+packages the run measured are read; a malformed marker there, or one not directly
+above a benchmark, fails the job.
+
 ### Every deviation has to reproduce
 
 The pools are noisy enough that a single measurement is as likely wobble as change
