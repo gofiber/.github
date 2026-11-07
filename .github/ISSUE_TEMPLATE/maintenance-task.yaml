@@ -1,0 +1,45 @@
+name: "🧹 Maintenance Task"
+title: "🧹 [Maintenance]: "
+description: Describe a maintenance task for this repository, such as refactoring, tests, CI or tooling.
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ### Notice
+        - Before submitting a maintenance task, please check if a similar task has already been filed.
+        - Clearly outline the purpose of the maintenance task and its impact on the project.
+        - For a bug, use the **🐛 Bug Report** template; for a new feature, the **🚀 Feature Request** template.
+        - Write your issue with clear and understandable English.
+  - type: textarea
+    id: task-description
+    attributes:
+      label: "Maintenance Task Description"
+      description: "Provide a detailed description of the maintenance task. Include the specific areas of the code base that require attention and the desired outcome."
+      placeholder: "Detail the maintenance task, specifying what needs to be done and why it is necessary."
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: "Impact on the Project (optional)"
+      description: "Explain the impact this maintenance will have on the project, including benefits and potential risks."
+      placeholder: "Describe how completing this task will benefit the project, or the risks of not addressing it."
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: "Additional Context (optional)"
+      description: "Any additional information or context regarding the maintenance task that might be helpful."
+      placeholder: "Provide any additional information that may be relevant to the task at hand."
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: "Checklist:"
+      description: "By submitting this issue, you confirm that:"
+      options:
+        - label: "I agree to follow the gofiber [Code of Conduct](https://github.com/gofiber/.github/blob/main/CODE_OF_CONDUCT.md)."
+          required: true
+        - label: "I have confirmed that this maintenance task is currently not being addressed."
+          required: true
+        - label: "I understand that this task will be evaluated by the maintainers and prioritized accordingly."
+          required: true
