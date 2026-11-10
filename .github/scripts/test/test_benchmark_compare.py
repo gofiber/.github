@@ -173,7 +173,7 @@ def test_a_zero_ratio_still_renders():
     key = compare.Key("p", "B", "allocs/op")
     _, better = compare.compare({key: 5.0}, {key: 0.0}, 1.5, 1.1, 1.0)
     rows = compare.group(better, True)
-    assert "∞x" in "\n".join(compare.table(rows, 10, True, 1.5, {}))
+    assert "∞x" in compare.row_line(rows[0], True, 1.5, {})
 
 
 def test_quantization_flips_of_rounded_units_are_ignored():
@@ -406,12 +406,34 @@ def test_empty_improve_threshold_mirrors_the_alert_threshold():
     assert "faster" in report, report
 
 
-def test_report_caps_the_table_so_the_comment_fits_github():
-    fast = bench(**{f"Benchmark{i}": "10.00 ns/op" for i in range(200)})
-    slow = bench(**{f"Benchmark{i}": "100.00 ns/op" for i in range(200)})
-    _, report, _ = run(fast, slow)
-    assert "and 185 more" in report, report
-    assert len(report) < 65536, len(report)
+def test_report_lists_every_finding_that_fits_the_comment():
+    # collapsed or not, the table is only cut for size, not after a fixed row count
+    base = bench(**{f"BenchmarkSlow{i}": "10.00 ns/op" for i in range(100)},
+                 **{f"BenchmarkFast{i}": "100.00 ns/op" for i in range(100)})
+    current = bench(**{f"BenchmarkSlow{i}": "100.00 ns/op" for i in range(100)},
+                    **{f"BenchmarkFast{i}": "10.00 ns/op" for i in range(100)})
+    _, report, _ = run(base, current)
+    assert "more_" not in report, report
+    assert report.count("| `BenchmarkSlow") == 100 and report.count("| `BenchmarkFast") == 100, report
+    assert "<!-- benchmark-fingerprint" in report, report
+
+
+def test_report_cuts_the_tables_so_the_comment_fits_github():
+    long = "Sub" * 20
+    base = bench(**{f"BenchmarkSlow{i}/{long}": "10.00 ns/op" for i in range(400)},
+                 **{f"BenchmarkFast{i}/{long}": "100.00 ns/op" for i in range(400)})
+    current = bench(**{f"BenchmarkSlow{i}/{long}": "100.00 ns/op" for i in range(400)},
+                    **{f"BenchmarkFast{i}/{long}": "10.00 ns/op" for i in range(400)})
+    _, report, _ = run(base, current)
+    assert len(report.encode("utf-8")) <= compare.REPORT_MAX_BYTES, len(report.encode("utf-8"))
+    # regressions get the room first, the improvements get what is left
+    assert report.count("| `BenchmarkSlow") == 400, len(report)
+    shown = report.count("| `BenchmarkFast")
+    assert 0 < shown < 400 and f"and {400 - shown} more_" in report, shown
+    # a smaller budget cuts the regressions too and still holds
+    _, report, _ = run(base, current, extra=["--max-bytes", "20000"])
+    assert len(report.encode("utf-8")) <= 20000, len(report.encode("utf-8"))
+    assert "| `BenchmarkFast" not in report and "more_" in report, len(report)
 
 
 def test_the_units_of_one_benchmark_share_a_single_row():

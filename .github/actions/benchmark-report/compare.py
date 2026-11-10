@@ -40,6 +40,8 @@ FINGERPRINT_RE = re.compile(r"<!-- benchmark-fingerprint\r?\n(?P<body>.*?)-->", 
 # Beyond this the digest would outweigh the report it rides on. Leaving it out
 # just means the next run counts as changed, which is the safe direction.
 FINGERPRINT_MAX = 200
+# below fork-comment.sh's 60000, leaving room for the marker post-report.sh prepends
+REPORT_MAX_BYTES = 59000
 UNITS = ("ns/op", "MB/s", "B/op", "allocs/op")
 # A run where this many benchmarks moved is not having a noise problem, and
 # re-measuring them would cost a good part of the full suite again.
@@ -474,20 +476,24 @@ def factor_text(value):
     return "∞x" if math.isinf(value) else f"{value:.2f}x"
 
 
-def table(rows, limit, improved, threshold, labels):
+def row_line(row, improved, threshold, labels):
     symbol = "⚡" if improved else "❗"
-    lines = ["| Benchmark | | Base → Current |", "|-|-|-|"]
-    for row in rows[:limit]:
-        label = labels.get(row.pkg, "")
-        name = f"`{row.name}`" + (f" <sub>{label}</sub>" if label else "")
-        values = " · ".join(
-            f"{number(c.base)} → {number(c.current)} {c.key.unit}" for c in row.changes
-        )
-        marked = f"{marks(row.strength, threshold, symbol)} {factor_text(row.strength)}"
-        lines.append(f"| {name} | {marked} | {values} |")
-    if len(rows) > limit:
-        lines.append(f"| _and {len(rows) - limit} more_ | | |")
-    return lines
+    label = labels.get(row.pkg, "")
+    name = f"`{row.name}`" + (f" <sub>{label}</sub>" if label else "")
+    values = " · ".join(f"{number(c.base)} → {number(c.current)} {c.key.unit}" for c in row.changes)
+    return f"| {name} | {marks(row.strength, threshold, symbol)} {factor_text(row.strength)} | {values} |"
+
+
+def table(lines, shown):
+    """The first `shown` rows; what did not fit is counted, so nothing goes missing silently."""
+    body = ["| Benchmark | | Base → Current |", "|-|-|-|", *lines[:shown]]
+    if len(lines) > shown:
+        body.append(f"| _and {len(lines) - shown} more_ | | |")
+    return body
+
+
+def size(text):
+    return len(text.encode("utf-8"))
 
 
 def details(summary, body, expanded=False):
@@ -586,34 +592,53 @@ def headline(rows, threshold, symbol, word):
     )
 
 
-def render(worse, better, threshold, improve_threshold, limit, notes):
+def render(worse, better, threshold, improve_threshold, max_bytes, notes):
     slower = group(worse, False)
     faster = group(better, True)
     labels = package_labels({row.pkg for row in slower + faster})
-    lines = []
-    if slower:
-        lines += details(
-            headline(slower, threshold, "❗", "slower"),
-            table(slower, limit, False, threshold, labels),
-            expanded=True,
-        )
-    if faster:
-        lines += details(
-            headline(faster, improve_threshold, "⚡", "faster"),
-            table(faster, limit, True, improve_threshold, labels),
-        )
-    if not lines:
-        lines = ["✅ No significant benchmark change."]
+    slow_lines = [row_line(row, False, threshold, labels) for row in slower]
+    fast_lines = [row_line(row, True, improve_threshold, labels) for row in faster]
     packages = {row.pkg for row in slower + faster}
     if len(packages) == 1:
         notes = notes + [f"`{packages.pop()}`"]
-    lines += ["", f"<sub>{' · '.join(notes)}</sub>"]
     found = digest(worse + better)
-    if len(found) <= FINGERPRINT_MAX:
-        lines += ["", "<!-- benchmark-fingerprint"]
-        lines += [f"{key} {value:.3g}" for key, value in sorted(found.items())]
-        lines += ["-->"]
-    return "\n".join(lines).rstrip() + "\n"
+
+    def assemble(slow_shown, fast_shown):
+        lines = []
+        if slower:
+            lines += details(
+                headline(slower, threshold, "❗", "slower"),
+                table(slow_lines, slow_shown),
+                expanded=True,
+            )
+        if faster:
+            lines += details(
+                headline(faster, improve_threshold, "⚡", "faster"),
+                table(fast_lines, fast_shown),
+            )
+        if not lines:
+            lines = ["✅ No significant benchmark change."]
+        lines += ["", f"<sub>{' · '.join(notes)}</sub>"]
+        if len(found) <= FINGERPRINT_MAX:
+            lines += ["", "<!-- benchmark-fingerprint"]
+            lines += [f"{key} {value:.3g}" for key, value in sorted(found.items())]
+            lines += ["-->"]
+        return "\n".join(lines).rstrip() + "\n"
+
+    # A collapsed table still counts against the comment size, so the tables are
+    # filled up to a byte budget instead of a fixed row count: everything shows on
+    # an ordinary PR, a sweeping change is cut before GitHub rejects the comment.
+    # The empty report carries both "and N more" lines with the largest N, so it is
+    # an upper bound of everything around the rows. Regressions get the room first.
+    budget = max_bytes - size(assemble(0, 0))
+    shown = []
+    for lines in (slow_lines, fast_lines):
+        count = 0
+        while count < len(lines) and size(lines[count]) + 1 <= budget:
+            budget -= size(lines[count]) + 1
+            count += 1
+        shown.append(count)
+    return assemble(*shown)
 
 
 def factor(text):
@@ -748,7 +773,8 @@ def main(argv=None):
     # regression of the same size would be, so both directions carry the same noise
     parser.add_argument("--improve-threshold", type=factor, default=None)
     parser.add_argument("--min-ns", type=float, default=1.0)
-    parser.add_argument("--limit", type=int, default=15)
+    # the report doubles as the PR comment, the tables are cut to fit this
+    parser.add_argument("--max-bytes", type=int, default=REPORT_MAX_BYTES)
     parser.add_argument("--hardware", default="")
     parser.add_argument("--commit", default="")
     parser.add_argument("--baseline-ref", default="")
@@ -937,10 +963,10 @@ def main(argv=None):
     if args.hardware:
         notes.append(args.hardware)
     if args.run_url:
-        # where the capped tables and the raw `go test -bench` numbers live
+        # where the raw `go test -bench` numbers live, and rows that did not fit
         notes.append(f"[full results]({args.run_url})")
 
-    report = render(worse, better, args.threshold, improve_threshold, args.limit, notes)
+    report = render(worse, better, args.threshold, improve_threshold, args.max_bytes, notes)
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(report)
 

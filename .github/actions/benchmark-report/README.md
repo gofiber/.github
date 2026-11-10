@@ -184,8 +184,10 @@ Both commit shas link to their commits, `full results` links to the workflow run
   benchmark move together and share a row.
 - The package is shortened to what is not shared with the other findings, and the
   full path moves to the footer when there is only one.
-- Tables stop at 15 rows. The footer links to the workflow run, where the job
-  summary carries the same report and the job log has every measured number.
+- Tables list every finding that fits the comment. A collapsed table counts against
+  GitHub's size limit all the same, so only a sweeping change gets cut, regressions
+  keep their rows first and an `and N more` row counts what is left out. The footer
+  links to the workflow run, where the job log has every measured number.
 
 ## Tests
 
