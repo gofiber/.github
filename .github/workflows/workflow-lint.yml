@@ -34,8 +34,7 @@ jobs:
           version: ${{ inputs.actionlint-version }}
           flags: ${{ inputs.flags }}
 
-      # wait-for-status-checks passes when match_pattern matches nothing, because
-      # [].every() is true, so a renamed job silently disables dependabot's merge gate.
+      # An alternative that matches no job silently drops that job from dependabot's merge gate.
       - name: Check automerge match_pattern against real job names
         shell: bash
         run: |
@@ -45,7 +44,7 @@ jobs:
           import glob, os, re, sys, yaml
 
           WF = '.github/workflows'
-          DEFAULT = 'test|discover|go'  # keep in sync with dependabot-automerge.yml
+          DEFAULT = '^test|^discover|^go|^workflows /|^scripts'  # keep in sync with dependabot-automerge.yml
 
           def load(path):
               try:

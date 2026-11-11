@@ -6,9 +6,9 @@ on:
   workflow_call:
     inputs:
       match_pattern:
-        description: Regex of status check names to wait for before auto-merging. Only triggered checks are awaited; unmatched/non-triggered ones are skipped.
+        description: Regex of status check names to wait for before auto-merging. Every matching check run must succeed or be skipped, and at least one must start within 10 minutes; anchor it, so a pull_request_target job cannot stand in for late CI.
         required: false
-        default: 'test|discover|go'
+        default: '^test|^discover|^go|^workflows /|^scripts'
         type: string
       wait-delay:
         description: Seconds to wait before the first poll, giving triggered checks time to register their check runs.
@@ -32,22 +32,56 @@ concurrency:
 jobs:
   wait_for_checks:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     # The PR author, not the actor: a repo that rebuilds a committed artefact on
     # the branch (multi-labeler rebuilds dist/) pushes with a PAT, which makes
     # its owner the actor of the follow-up run and left the merge job skipped on
     # a green PR. Foreign commits are rejected in the job below instead.
     if: ${{ github.event.pull_request.user.login == 'dependabot[bot]' }}
     steps:
-      - name: Wait for check is finished
-        id: wait_for_checks
-        uses: poseidon/wait-for-status-checks@e7e24423722c5b8e97a6dd5848827d2a412f812d # v0.7.0
-        with:
-          token: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
-          match_pattern: ${{ inputs.match_pattern != '' && inputs.match_pattern || 'test|discover|go' }}
-          delay: ${{ inputs.wait-delay || 60 }}
-          interval: 60
-          timeout: 600
+      # Every matching run counts on its own: poseidon/wait-for-status-checks kept one run
+      # per name (a red module merged in contrib#2686) and passed on none (fiber#4872).
+      - name: Wait for the gated checks
+        env:
+          GH_TOKEN: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
+          CHECK_RUNS: repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs?per_page=100
+          MATCH_PATTERN: ${{ inputs.match_pattern != '' && inputs.match_pattern || '^test|^discover|^go|^workflows /|^scripts' }}
+          DELAY: ${{ inputs.wait-delay || 60 }}
+        run: |
+          sleep "$DELAY"
+          settled=0
+          for poll in $(seq 50); do
+            if [ "$poll" -gt 1 ]; then
+              sleep 30
+            fi
+            states=$(gh api --paginate "$CHECK_RUNS" --jq '.check_runs[]
+              | select((.name | test(env.MATCH_PATTERN)) and (.name | endswith("wait_for_checks") | not))
+              | if .status != "completed" then "pending"
+                elif .conclusion == "success" or .conclusion == "skipped" then "ok"
+                else "failed: \(.name) (\(.conclusion))" end') || continue
+            if grep '^failed' <<<"$states"; then
+              echo "::error ::a gated check failed, refusing to auto-merge"
+              exit 1
+            fi
+            if [ -z "$states" ]; then
+              if [ "$poll" -lt 20 ]; then
+                continue
+              fi
+              echo "::error ::no check matching '$MATCH_PATTERN' started within 10 minutes, refusing to auto-merge"
+              exit 1
+            fi
+            # a second settled poll also catches jobs that only start once their `needs:` finished
+            if grep -q '^pending' <<<"$states"; then
+              settled=0
+            else
+              settled=$((settled + 1))
+            fi
+            if [ "$settled" -ge 2 ]; then
+              exit 0
+            fi
+          done
+          echo "::error ::gated checks did not finish within 25 minutes, refusing to auto-merge"
+          exit 1
   dependabot:
     needs: [wait_for_checks]
     name: Dependabot auto-merge
@@ -95,14 +129,14 @@ jobs:
                github.repository != 'gofiber/.github' &&
                !contains(steps.metadata.outputs.dependency-names, 'dorny/paths-filter') &&
                !contains(steps.metadata.outputs.dependency-names, 'dependabot/fetch-metadata') &&
-               !contains(steps.metadata.outputs.dependency-names, 'poseidon/wait-for-status-checks') &&
                !contains(steps.metadata.outputs.dependency-names, 'release-drafter/release-drafter')) }}
         run: |
           gh pr review --approve "$PR_URL"
           # retries absorb a check landing after the merge attempt (unstable status) and a
-          # concurrent merge moving the base; measured stragglers ran 106s and 179s late
+          # concurrent merge moving the base; measured stragglers ran 106s and 179s late.
+          # No --auto: an armed auto-merge took the next, untested head (contrib#2680).
           n=0
-          until gh pr merge --auto --merge "$PR_URL"; do
+          until gh pr merge --merge --match-head-commit "$HEAD_SHA" "$PR_URL"; do
             n=$((n + 1))
             [ "$n" -ge 10 ] && exit 1
             echo "merge failed ($n/10), retrying in 30s..."
@@ -110,4 +144,5 @@ jobs:
           done
         env:
           PR_URL: ${{github.event.pull_request.html_url}}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ secrets.github-token != '' && secrets.github-token || github.token }}

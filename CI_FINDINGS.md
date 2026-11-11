@@ -42,21 +42,35 @@ handled per repo, both easy to get wrong:
    the Actions bot may not approve a pull request. `secrets: inherit` does **not**
    fix this: it passes secrets under their original names, while the central workflow
    expects `github-token`. It has to be mapped explicitly.
-2. **`match_pattern`.** The central default `test|discover|go` matches none of the
-   repos, because their job names differ. A wrong pattern is the dangerous failure:
-   the wait job finds no matching checks, skips them, and merges before CI is done -
-   while everything looks green.
+2. **`match_pattern`.** The central default `^test|^discover|^go|^workflows /|^scripts`
+   fits none of the repos, because their job names differ. Three holes let red Dependabot
+   pull requests merge until November 2026, all closed in the central workflow since:
+   - poseidon/wait-for-status-checks kept one check run per name. In contrib, storage and
+     template every module's workflow names its job `Tests`, so a green module hid a red
+     one (contrib#2686, template#584). The wait job now judges every matching run.
+   - No matching run counted as a pass, so a dead pattern or a late CI start merged before
+     any test ran (fiber#4872, whose CI started six minutes after it opened). Now at least
+     one match has to start within 10 minutes.
+   - `gh pr merge --auto` armed GitHub's auto-merge, which then took the next head
+     Dependabot pushed, untested (contrib#2680 among others). The merge now happens
+     directly and is pinned to the checked head with `--match-head-commit`.
+
+   A pattern that leaves out a job still merges without that job. Anchor every
+   alternative (`^lint /`, not `lint`): an unanchored one can match a
+   `pull_request_target` job, which arrives on time and would stand in for late CI. Each
+   pattern also has to match a check that runs on workflow-only changes, `^actionlint /`,
+   or `github_actions` updates never merge.
 
 | Repo | `match_pattern` |
 | --- | --- |
-| fiber | `^unit\|^lint /` |
-| docs | `build\|deploy` |
-| contrib, template, utils, cli, boilerplate | `Tests\|lint` |
-| storage | `Tests\|Linter` |
-| schema | `unit\|lint` |
-| recipes | `builds` |
-| awesome-fiber | `Linter` |
-| multi-labeler | `Test\|Build\|[Ll]int` |
+| fiber, schema | `^unit\|^repeated\|^lint /\|^actionlint /` |
+| contrib, template, boilerplate, storage | `^Tests\|^lint /\|^actionlint /` |
+| utils, cli | `^Build\|^lint /\|^actionlint /` |
+| recipes | `^builds\|^make-builds\|^lint /\|^actionlint /` |
+| docs | `^deploy\|^actionlint /` |
+| awesome-fiber | `^Linter\|^actionlint /` |
+| benchmarks | `^compare\|^lint /\|^actionlint /` |
+| multi-labeler | `^Test\|^Build\|^Lint \|^Package\|^Multi Labeler\|^actionlint /` |
 
 A caller therefore looks like this, and the `permissions` block is mandatory because
 a called workflow can never hold more rights than its caller:
@@ -66,7 +80,7 @@ jobs:
   automerge:
     uses: gofiber/.github/.github/workflows/dependabot-automerge.yml@main
     with:
-      match_pattern: '^unit|^lint /'
+      match_pattern: '^unit|^repeated|^lint /|^actionlint /'
     secrets:
       github-token: ${{ secrets.PR_TOKEN }}
 ```
@@ -74,13 +88,13 @@ jobs:
 Check names change with the move: a called workflow prefixes its jobs, so
 `wait_for_checks` becomes `automerge / wait_for_checks`. Safe here, because no repo
 requires status checks, neither through branch protection nor through a ruleset. Worth
-re-checking before a similar move, and worth checking that no `match_pattern` matches the
-new names - the wait job would otherwise wait on itself.
+re-checking before a similar move. The wait job skips its own `wait_for_checks` run, so a
+pattern matching it cannot pass the gate on its own.
 
 ### Major updates: everywhere except this repository
 
 The central workflow auto-merges **major** `github_actions` updates, which the local
-copies never did, except for four glue actions and except in `gofiber/.github` itself.
+copies never did, except for three glue actions and except in `gofiber/.github` itself.
 The asymmetry is deliberate. In the twelve leaf repos an action sits in a workflow that
 runs on pull requests, so a broken major is caught by the same CI that gates the merge.
 This repository's own pull request checks are `test-actions.yml` (`scripts`, `discover`,
@@ -96,17 +110,17 @@ Two distinct errors, and only one is the base branch race the retry loop was wri
 | Error | Cause |
 | --- | --- |
 | `Base branch was modified` | another Dependabot PR merged while this one was merging |
-| `Pull request is in unstable status` | a check outside `match_pattern` was still running; `gh pr merge --auto` merges directly once the PR looks mergeable, and GitHub rejects that while any check is pending |
+| `Pull request is in unstable status` | a check outside `match_pattern` was still running; `gh pr merge` merges directly once the PR looks mergeable, and GitHub rejects that while any check is pending |
 
 The second is the more common one, and waiting for those checks is not the fix it looks
-like. In storage the straggler was the 509s benchmark, which does not fit the 600s
-`wait_for_checks` timeout with any margin; in recipes it was CodeQL `Analyze (go)`, not a
+like. In storage the straggler was the 509s benchmark, too slow and noisy to gate a
+dependency bump on; in recipes it was CodeQL `Analyze (go)`, not a
 benchmark at all. Both finished after the merge attempt, by 106s and 179s. Enumerating
 every check per repo would need maintaining forever, so the merge is retried ten times
 30s apart instead: 270s spans both cases, and the loop lives in one file.
 
-A red auto-merge run is not automatically a workflow bug. Contrib's eight failures were
-real test failures, where the wait job correctly refused to merge.
+A red auto-merge run is not automatically a workflow bug: a failed gated check is the gate
+doing its job.
 
 ## Blacksmith runners
 
