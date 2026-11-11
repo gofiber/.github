@@ -6,9 +6,14 @@ on:
   workflow_call:
     inputs:
       match_pattern:
-        description: Regex of status check names to wait for before auto-merging. Every matching check run must succeed or be skipped, and at least one must start within 10 minutes; anchor it, so a pull_request_target job cannot stand in for late CI.
+        description: Regex of check run names that must all succeed or be skipped before merging. Anchor it, so a pull_request_target job cannot stand in for late CI.
         required: false
         default: '^test|^discover|^go|^workflows /|^scripts'
+        type: string
+      required_checks:
+        description: 'One line per dependabot package-ecosystem, e.g. "gomod: ^unit|^lint /". Each alternative must start within 10 minutes and pass, and an ecosystem without a line is not merged. Empty means any one match_pattern check will do.'
+        required: false
+        default: ''
         type: string
       wait-delay:
         description: Seconds to wait before the first poll, giving triggered checks time to register their check runs.
@@ -46,32 +51,55 @@ jobs:
           GH_TOKEN: ${{ secrets.github-token != '' && secrets.github-token || github.token }}
           CHECK_RUNS: repos/${{ github.repository }}/commits/${{ github.event.pull_request.head.sha }}/check-runs?per_page=100
           MATCH_PATTERN: ${{ inputs.match_pattern != '' && inputs.match_pattern || '^test|^discover|^go|^workflows /|^scripts' }}
+          # this repository runs the workflow directly, without inputs
+          REQUIRED_CHECKS: "${{ inputs.required_checks || (github.repository == 'gofiber/.github' && 'github-actions: ^workflows /|^scripts|^discover|^go') || '' }}"
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
           DELAY: ${{ inputs.wait-delay || 60 }}
         run: |
+          # dependabot/<package manager>/..., named as in dependabot.yml
+          eco=$(cut -d/ -f2 <<<"$HEAD_REF" | sed 's/^go_modules$/gomod/; s/^npm_and_yarn$/npm/; s/_/-/g')
+          if [ -n "$REQUIRED_CHECKS" ]; then
+            required=$(awk -F': *' -v eco="$eco" '$1 == eco { sub(/^[^:]*: */, ""); print }' <<<"$REQUIRED_CHECKS")
+            if [ -z "$required" ]; then
+              echo "::error ::required_checks names no checks for $eco updates, refusing to auto-merge"
+              exit 1
+            fi
+            IFS='|' read -ra expected <<<"$required"
+          else
+            required=$MATCH_PATTERN
+            expected=("$MATCH_PATTERN")
+          fi
+          export GATE="$MATCH_PATTERN|$required"
+
           sleep "$DELAY"
           settled=0
           for poll in $(seq 50); do
             if [ "$poll" -gt 1 ]; then
               sleep 30
             fi
-            states=$(gh api --paginate "$CHECK_RUNS" --jq '.check_runs[]
-              | select((.name | test(env.MATCH_PATTERN)) and (.name | endswith("wait_for_checks") | not))
-              | if .status != "completed" then "pending"
-                elif .conclusion == "success" or .conclusion == "skipped" then "ok"
-                else "failed: \(.name) (\(.conclusion))" end') || continue
-            if grep '^failed' <<<"$states"; then
+            runs=$(gh api --paginate "$CHECK_RUNS" --jq '.check_runs[]
+              | select((.name | test(env.GATE)) and (.name | endswith("wait_for_checks") | not))
+              | (if .status != "completed" then "pending"
+                 elif .conclusion == "success" or .conclusion == "skipped" then "ok"
+                 else "failed (\(.conclusion))" end) + "\t" + .name') || continue
+            if grep '^failed' <<<"$runs"; then
               echo "::error ::a gated check failed, refusing to auto-merge"
               exit 1
             fi
-            if [ -z "$states" ]; then
+            missing=()
+            for check in "${expected[@]}"; do
+              cut -f2 <<<"$runs" | grep -qE -- "$check" || missing+=("$check")
+            done
+            if [ "${#missing[@]}" -gt 0 ]; then
+              settled=0
               if [ "$poll" -lt 20 ]; then
                 continue
               fi
-              echo "::error ::no check matching '$MATCH_PATTERN' started within 10 minutes, refusing to auto-merge"
+              echo "::error ::no check matching $(IFS=,; echo "${missing[*]}") started within 10 minutes, refusing to auto-merge"
               exit 1
             fi
             # a second settled poll also catches jobs that only start once their `needs:` finished
-            if grep -q '^pending' <<<"$states"; then
+            if grep -q '^pending' <<<"$runs"; then
               settled=0
             else
               settled=$((settled + 1))

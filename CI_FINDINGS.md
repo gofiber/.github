@@ -49,8 +49,10 @@ handled per repo, both easy to get wrong:
      template every module's workflow names its job `Tests`, so a green module hid a red
      one (contrib#2686, template#584). The wait job now judges every matching run.
    - No matching run counted as a pass, so a dead pattern or a late CI start merged before
-     any test ran (fiber#4872, whose CI started six minutes after it opened). Now at least
-     one match has to start within 10 minutes.
+     any test ran (fiber#4872, whose CI started six minutes after it opened). Now every
+     check that `required_checks` lists for the update's ecosystem has to start within 10
+     minutes and pass; a matching check alone is not enough, since one workflow could
+     still be late while the others are done.
    - `gh pr merge --auto` armed GitHub's auto-merge, which then took the next head
      Dependabot pushed, untested (contrib#2680 among others). The merge now happens
      directly and is pinned to the checked head with `--match-head-commit`.
@@ -60,6 +62,12 @@ handled per repo, both easy to get wrong:
    `pull_request_target` job, which arrives on time and would stand in for late CI. Each
    pattern also has to match a check that runs on workflow-only changes, `^actionlint /`,
    or `github_actions` updates never merge.
+
+   `required_checks` names, per ecosystem, only the checks that always run for its
+   updates. Path filters keep `unit` off a workflow-only update and `actionlint` off a
+   go.mod bump, so one list for both would block either kind forever. workflow-lint
+   checks every line against `dependabot.yml` and the real job names, and rejects a gated
+   job that `needs:` an ungated one, because the wait job would settle before it starts.
 
 | Repo | `match_pattern` |
 | --- | --- |
@@ -81,6 +89,9 @@ jobs:
     uses: gofiber/.github/.github/workflows/dependabot-automerge.yml@main
     with:
       match_pattern: '^unit|^repeated|^lint /|^actionlint /'
+      required_checks: |
+        gomod: ^unit|^repeated|^lint /
+        github-actions: ^actionlint /
     secrets:
       github-token: ${{ secrets.PR_TOKEN }}
 ```

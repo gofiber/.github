@@ -35,7 +35,7 @@ jobs:
           flags: ${{ inputs.flags }}
 
       # An alternative that matches no job silently drops that job from dependabot's merge gate.
-      - name: Check automerge match_pattern against real job names
+      - name: Check the automerge gate against real job names
         shell: bash
         run: |
           set -euo pipefail
@@ -53,14 +53,16 @@ jobs:
               except Exception:
                   return {}
 
-          pattern, found = None, False
+          pattern, required, found = None, '', False
           for name in ('dependabot-automerge.yml', 'dependabot_automerge.yml'):
               path = os.path.join(WF, name)
               if os.path.exists(path):
                   found = True
                   for job in (load(path).get('jobs') or {}).values():
                       if isinstance(job, dict) and 'automerge' in str(job.get('uses', '')):
-                          pattern = (job.get('with') or {}).get('match_pattern') or DEFAULT
+                          inputs = job.get('with') or {}
+                          pattern = inputs.get('match_pattern') or DEFAULT
+                          required = inputs.get('required_checks') or ''
                   pattern = pattern or DEFAULT
           if not found:
               print('no dependabot automerge workflow, nothing to check')
@@ -68,7 +70,7 @@ jobs:
 
           # A check run is named after the job's `name:`, or its key, and a job that
           # calls a reusable workflow is prefixed onto the callee's own job name.
-          names = set()
+          names, jobs = set(), {}
           for f in sorted(glob.glob(f'{WF}/*.yml') + glob.glob(f'{WF}/*.yaml')):
               for key, job in (load(f).get('jobs') or {}).items():
                   if not isinstance(job, dict):
@@ -76,11 +78,41 @@ jobs:
                   names.update({str(key), str(job.get('name') or key)})
                   if job.get('uses'):
                       names.add(f'{key} / ')
+                  jobs[(f, str(key))] = job
 
-          dead = [a for a in pattern.split('|') if not any(re.search(a, n) for n in names)]
-          if dead:
-              print(f'::error::match_pattern {pattern!r} has alternatives that match no job '
-                    f'in this repo: {dead}. Dependabot would merge without waiting for them.')
+          def dead(alternatives):
+              return [a for a in alternatives.split('|') if not any(re.search(a, n) for n in names)]
+
+          errors = []
+          if dead(pattern):
+              errors.append(f'match_pattern {pattern!r} has alternatives that match no job '
+                            f'in this repo: {dead(pattern)}. Dependabot would merge without waiting for them.')
+
+          # same parsing as the wait job: "<package-ecosystem>: <alternatives>" per line
+          lines = dict(re.match(r'([^:]*): *(.*)', l).groups() for l in required.splitlines() if ':' in l)
+          ecosystems = {str(u.get('package-ecosystem')) for u in load('.github/dependabot.yml').get('updates') or []}
+          for eco, checks in lines.items():
+              if eco not in ecosystems:
+                  errors.append(f'required_checks has a line for {eco!r}, which .github/dependabot.yml does not update')
+              if dead(checks):
+                  errors.append(f'required_checks for {eco} has alternatives that match no job: {dead(checks)}. '
+                                f'Its updates would never merge.')
+          for eco in sorted(ecosystems - set(lines)) if required else []:
+              print(f'::warning::required_checks has no line for {eco}, so its updates are not auto-merged')
+
+          # The wait job settles once no gated run is pending, which is too early when a
+          # gated job only starts after an ungated one it needs.
+          gate = '|'.join([pattern, *lines.values()])
+          gated = lambda key, job: bool(re.search(gate, str(job.get('name') or key)) or re.search(gate, key))
+          for (f, key), job in jobs.items():
+              needs = job.get('needs') or []
+              for parent in [needs] if isinstance(needs, str) else needs:
+                  if gated(key, job) and (f, parent) in jobs and not gated(parent, jobs[(f, parent)]):
+                      errors.append(f'{f}: gated job {key!r} needs {parent!r}, which is not gated')
+
+          for e in errors:
+              print(f'::error::{e}')
+          if errors:
               sys.exit(1)
-          print(f'match_pattern {pattern!r}: every alternative matches a job')
+          print(f'match_pattern {pattern!r} and required_checks: every alternative matches a job')
           PY

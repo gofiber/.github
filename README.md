@@ -44,7 +44,7 @@ Applies labels from the shared configuration in this repository using the [`gofi
 
 ### dependabot-automerge
 Merges Dependabot pull requests once their gated checks pass.
-- Inputs: `match_pattern` (anchored regex of check run names; every matching run must succeed or be skipped, and at least one must start within 10 minutes; default `^test|^discover|^go|^workflows /|^scripts`), `wait-delay` (seconds before the first poll, default `60`).
+- Inputs: `match_pattern` (anchored regex of check run names; every matching run must succeed or be skipped; default `^test|^discover|^go|^workflows /|^scripts`), `required_checks` (one line per `package-ecosystem` from `dependabot.yml`, e.g. `gomod: ^unit|^lint /`; each alternative must start within 10 minutes and pass, and an ecosystem without a line is not merged; empty means any one `match_pattern` check will do), `wait-delay` (seconds before the first poll, default `60`).
 - Secrets: `github-token` with `pull_requests:write` and `contents:write`. Declared optional, but a PAT is required in practice: the Actions bot may not approve a pull request, so the default token cannot get the merge through.
 - Only runs when the pull request author is `dependabot[bot]`, and merges only the head commit it checked.
 - Merges minor and patch updates, plus `github_actions` majors - but not for three glue actions, and not in this repository, whose reusable workflows no pull request check here exercises.
