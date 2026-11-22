@@ -43,7 +43,7 @@ The following reusable workflows now live in this repository and can be called f
 - `go-lint-single.yml`: Runs `golangci-lint` once at the repo root for single-module repos (fiber, utils, cli, schema, boilerplate).
 - `go-lint-multi.yml`: Discovers Go modules, detects changed packages on PRs, and lints each in parallel for multi-module repos (contrib, storage, template).
 - `go-test.yml`: Runs `gotestsum` across a configurable Go/platform matrix and mirrors the coverage uploads used in `gofiber/fiber`.
-- `api-docs.yml`: Regenerates the Markdown blocks owned by `genapidocs` and fails on drift. Builds the generator from `.github/actions/api-docs` on one pinned build context (`linux/amd64`, cgo off) with the caller's Go version.
+- `api-docs.yml`: Regenerates the Markdown blocks owned by `genapidocs` and fails on drift. Builds the generator from `.github/actions/api-docs` with the caller's Go version; the generator pins its own build context (`linux/amd64`, cgo on).
 - `markdown-check.yml`: Provides Markdown linting via `markdownlint-cli2` with the org-standard globs.
 - `workflow-lint.yml`: Runs `actionlint` (plus its shellcheck pass over every `run:` block) on a repo's workflows. Each caller needs a `.github/actionlint.yaml` listing `blacksmith-*` under `self-hosted-runner.labels`, otherwise every job is reported as using an unknown runner label. The actionlint version is pinned by input so a new release cannot break all repos at once.
 - `pr-title-lint.yml`: Checks that a pull request title is a Conventional Commits subject, because a squash merge writes the title as the commit subject. The allowed types are an input; `Revert "..."` is accepted as-is, since GitHub's revert button writes that title itself.

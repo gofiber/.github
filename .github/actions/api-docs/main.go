@@ -34,6 +34,7 @@ var (
 	errUndocumentedAPI   = errors.New("exported declarations are not documented")
 	fencePattern         = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
 	majorVersion         = regexp.MustCompile(`^v\d+$`)
+	nearMarker           = regexp.MustCompile(`^<!--\s*/?go:doc`)
 )
 
 type packageDocs struct {
@@ -115,11 +116,14 @@ func writeAtomic(path string, data []byte) error {
 	return nil
 }
 
-// loadPackage uses the Go tool's file selection so build constraints match go generate.
+// loadPackage uses the Go tool's file selection under one fixed build context,
+// so a page comes out the same on every machine that generates or checks it.
 func loadPackage(dir string) (packageDocs, error) {
 	// -find skips dependency resolution; only the package's own file lists are needed.
 	cmd := exec.Command("go", "list", "-find", "-json=Dir,ImportPath,GoFiles,CgoFiles,TestGoFiles,XTestGoFiles", ".")
 	cmd.Dir = dir
+	// go list only selects files, so cgo needs no C compiler here.
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=1")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
@@ -184,29 +188,32 @@ func loadPackage(dir string) (packageDocs, error) {
 	}
 	required := slices.Sorted(maps.Keys(symbols))
 	for _, typ := range pkg.Types {
-		ast.Inspect(typ.Decl, func(node ast.Node) bool {
-			var fields []*ast.Field
-			switch node := node.(type) {
-			case *ast.StructType:
-				fields = node.Fields.List
-			case *ast.InterfaceType:
-				fields = node.Methods.List
+		// Only the declared type's own members: a constraint or a nested type's are not members of typ.
+		spec, ok := typ.Decl.Specs[0].(*ast.TypeSpec)
+		if !ok {
+			continue
+		}
+		var fields []*ast.Field
+		isInterface := false
+		switch node := spec.Type.(type) {
+		case *ast.StructType:
+			fields = node.Fields.List
+		case *ast.InterfaceType:
+			fields, isInterface = node.Methods.List, true
+		}
+		for _, field := range fields {
+			list := &ast.FieldList{List: []*ast.Field{field}}
+			var member ast.Expr = &ast.StructType{Fields: list}
+			if isInterface {
+				member = &ast.InterfaceType{Methods: list}
 			}
-			for _, field := range fields {
-				list := &ast.FieldList{List: []*ast.Field{field}}
-				var member ast.Expr = &ast.StructType{Fields: list}
-				if _, isInterface := node.(*ast.InterfaceType); isInterface {
-					member = &ast.InterfaceType{Methods: list}
-				}
-				for _, name := range field.Names {
-					if ast.IsExported(name.Name) {
-						symbols[typ.Name+"."+name.Name] = symbolDoc{node: member, fragment: true}
-					}
+			for _, name := range field.Names {
+				key := typ.Name + "." + name.Name
+				if _, exists := symbols[key]; !exists && ast.IsExported(name.Name) {
+					symbols[key] = symbolDoc{node: member, fragment: true}
 				}
 			}
-
-			return fields == nil
-		})
+		}
 	}
 	exampleNames := make(map[string]bool)
 	for _, example := range examples {
@@ -253,8 +260,20 @@ func playable(example *doc.Example) *ast.File {
 		return nil
 	}
 	// go/doc checks single-function examples itself but trusts whole-file examples blindly.
-	if file, ok := example.Code.(*ast.File); ok && !selfContained(file) {
-		return nil
+	if file, ok := example.Code.(*ast.File); ok {
+		if !selfContained(file) {
+			return nil
+		}
+		// go/doc renames the example to main but keeps its doc comment, which names a function the program lacks.
+		for index, decl := range play.Decls {
+			if fn, isFunc := decl.(*ast.FuncDecl); isFunc && fn.Recv == nil && fn.Name.Name == "main" && fn.Doc != nil {
+				play.Comments = slices.DeleteFunc(slices.Clone(play.Comments), func(group *ast.CommentGroup) bool { return group == fn.Doc })
+				renamed := *fn
+				renamed.Doc = nil
+				play.Decls = slices.Clone(play.Decls)
+				play.Decls[index] = &renamed
+			}
+		}
 	}
 	play.Decls = slices.DeleteFunc(slices.Clone(play.Decls), func(decl ast.Decl) bool {
 		gen, ok := decl.(*ast.GenDecl)
@@ -403,8 +422,13 @@ func render(markdown []byte, docs packageDocs) ([]byte, error) {
 			blocks++
 			continue
 		}
+		if content == "<!-- go:doc-all -->" {
+			checkAll = true
+		} else if nearMarker.MatchString(content) {
+			// A misspelled marker would otherwise read as prose and leave its block stale.
+			return nil, fmt.Errorf("%w at line %d", errMalformedBlocks, index+1)
+		}
 		if names == nil {
-			checkAll = checkAll || content == "<!-- go:doc-all -->"
 			fmt.Fprint(&result, line)
 		}
 	}

@@ -67,6 +67,34 @@ func TestPackageMembers(t *testing.T) {
 	require.Contains(t, string(out), "```go\n// Limit caps the retries.\n//\n// Optional. Default: 3\nLimit int\n```")
 }
 
+// TestPackageMemberShadowing keeps a method reachable when a constraint or a nested type declares the same name.
+func TestPackageMemberShadowing(t *testing.T) {
+	t.Parallel()
+	dir := fixture(t)
+	source := "package sample\ntype Set[T interface{ String() string }] struct{ Items []T }\n// String joins the items.\nfunc (s Set[T]) String() string { return \"\" }\ntype Table map[string]struct{ Serve func() }\n// Serve runs the table.\nfunc (t Table) Serve() {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "shadow.go"), []byte(source), 0o600))
+	docs, err := loadPackage(dir)
+	require.NoError(t, err)
+	out, err := render([]byte("<!-- go:doc Set.String Table.Serve -->\n<!-- /go:doc -->"), docs)
+	require.NoError(t, err)
+	require.Contains(t, string(out), "// String joins the items.\nfunc (s Set[T]) String() string")
+	require.Contains(t, string(out), "// Serve runs the table.\nfunc (t Table) Serve()")
+}
+
+// TestRenderNearMarkers reports a misspelled marker instead of leaving its block stale.
+func TestRenderNearMarkers(t *testing.T) {
+	t.Parallel()
+	for _, page := range []string{
+		"<!-- go:doc Config-->\n<!--/go:doc -->\n",
+		"<!-- go:doc-all-->\n",
+		"<!-- go:doc -->\n",
+		"- item\n  <!--go:doc Config -->\n",
+	} {
+		_, err := render([]byte(page+"<!-- go:doc Config -->\n<!-- /go:doc -->\n"), packageDocs{})
+		require.ErrorIs(t, err, errMalformedBlocks, page)
+	}
+}
+
 // TestPackageNameCollisions makes example selection deterministic and rejects ambiguous public names.
 func TestPackageNameCollisions(t *testing.T) {
 	t.Parallel()

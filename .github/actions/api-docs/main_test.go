@@ -103,6 +103,7 @@ import (
 
 func show(b sample.Box[int]) { fmt.Println(len("ab") + b.Value()) }
 
+// ExampleBox demonstrates Box.
 func ExampleBox() {
 	show(sample.Box[int]{Item: 1})
 	// Output: 3
@@ -156,6 +157,7 @@ func TestGenerate(t *testing.T) {
 	require.Contains(t, string(result), "sample.NewConfig(1)\n}\n```\n\nOutput:\n\n```text\n```")
 	require.Contains(t, string(result), "func show(b sample.Box[int])")
 	require.NotContains(t, string(result), "func Example")
+	require.NotContains(t, string(result), "ExampleBox demonstrates")
 	require.NotContains(t, string(result), "import ()")
 	require.Contains(t, string(result), "func NewConfig(value int) Config")
 	require.Contains(t, string(result), "func (b Box[T]) Value() T")
@@ -227,17 +229,10 @@ func TestGenerateMissingOutput(t *testing.T) {
 	require.ErrorIs(t, generate(t.TempDir(), filepath.Join(t.TempDir(), "missing.md")), os.ErrNotExist)
 }
 
-// TestGenerateCgo includes declarations from cgo files selected by the Go build context.
+// TestGenerateCgo includes cgo files whatever the caller's CGO_ENABLED is, because the generator pins its build context.
 func TestGenerateCgo(t *testing.T) {
 	t.Parallel()
 	dir := fixture(t)
-	cmd := exec.Command("go", "env", "CGO_ENABLED")
-	cmd.Dir = dir
-	enabled, err := cmd.Output()
-	require.NoError(t, err)
-	if strings.TrimSpace(string(enabled)) != "1" {
-		t.Skip("cgo files are excluded in this build context")
-	}
 	source := "package sample\n\nimport \"C\"\n\n// CgoConfig configures a cgo-backed API.\ntype CgoConfig struct { Enabled bool }\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "cgo.go"), []byte(source), 0o600))
 	path := filepath.Join(dir, "docs.md")
