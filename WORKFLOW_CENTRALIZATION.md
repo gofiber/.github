@@ -43,6 +43,7 @@ The following reusable workflows now live in this repository and can be called f
 - `go-lint-single.yml`: Runs `golangci-lint` once at the repo root for single-module repos (fiber, utils, cli, schema, boilerplate).
 - `go-lint-multi.yml`: Discovers Go modules, detects changed packages on PRs, and lints each in parallel for multi-module repos (contrib, storage, template).
 - `go-test.yml`: Runs `gotestsum` across a configurable Go/platform matrix and mirrors the coverage uploads used in `gofiber/fiber`.
+- `api-docs.yml`: Regenerates the Markdown blocks owned by `genapidocs` and fails on drift. Builds the generator from `.github/actions/api-docs` on one pinned build context (`linux/amd64`, cgo off) with the caller's Go version.
 - `markdown-check.yml`: Provides Markdown linting via `markdownlint-cli2` with the org-standard globs.
 - `workflow-lint.yml`: Runs `actionlint` (plus its shellcheck pass over every `run:` block) on a repo's workflows. Each caller needs a `.github/actionlint.yaml` listing `blacksmith-*` under `self-hosted-runner.labels`, otherwise every job is reported as using an unknown runner label. The actionlint version is pinned by input so a new release cannot break all repos at once.
 - `pr-title-lint.yml`: Checks that a pull request title is a Conventional Commits subject, because a squash merge writes the title as the commit subject. The allowed types are an input; `Revert "..."` is accepted as-is, since GitHub's revert button writes that title itself.
@@ -59,6 +60,7 @@ The following reusable workflows now live in this repository and can be called f
 
 Composite actions:
 
+- `.github/actions/api-docs`: Source of the `genapidocs` generator (Go declarations, doc comments and executable examples to marked Markdown blocks) plus the build, generate and drift steps the `api-docs` workflow runs.
 - `.github/actions/gotestsum`: Test runner used by the go-test workflow and repo test matrices.
 - `.github/actions/benchmark-pages`: Syncs the shared benchmark page (the `index.html` colocated with the action) into a repo's gh-pages branch, writes a marker-guarded root redirect to `benchmarks/`, and, for multi-folder layouts like storage, regenerates `folders.json` and replaces the per-package stock pages with redirect stubs that preselect the package filter. The page renders lazily, merges the per-metric entries of each benchmark, groups by package, and surfaces recent changes: per-card badges and a top-movers summary compare the latest run against the median of the previous runs, with sorting by change and a 30/90-day range filter (state lives in the URL hash). Runs automatically as the last step of the `benchmark.yml` workflow (disable with `sync-pages: false`) or standalone as a post-matrix job. Because the page is copied on every publish, edits to the central `index.html` roll out to all repos with their next benchmark run.
 
