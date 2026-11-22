@@ -270,6 +270,7 @@ func selfContained(file *ast.File) bool {
 		unresolved[ident] = types.Universe.Lookup(ident.Name) == nil
 	}
 	imports := map[string]bool{}
+	dot := false
 	for _, spec := range file.Imports {
 		importPath := strings.Trim(spec.Path.Value, "\"`") // The parser already rejected malformed paths.
 		// shortcut: like go/doc, assume an unrenamed import's name is its last non-version path element; validate by compiling if a package breaks that.
@@ -281,7 +282,8 @@ func selfContained(file *ast.File) bool {
 			name = spec.Name.Name
 		}
 		if name == "." {
-			return true // Dot imports hide where names come from, so trust the passing example.
+			dot = true // A dot import can only supply exported names, so lowercase ones stay unresolved.
+			continue
 		}
 		imports[name] = true
 	}
@@ -300,15 +302,15 @@ func selfContained(file *ast.File) bool {
 				if !ok {
 					continue
 				}
-				if ident, ok := kv.Key.(*ast.Ident); ok && ident.Obj == nil && types.Universe.Lookup(ident.Name) == nil {
+				if ident, ok := kv.Key.(*ast.Ident); ok && ident.Obj == nil && file.Scope.Lookup(ident.Name) == nil && types.Universe.Lookup(ident.Name) == nil {
 					unresolved[ident] = true
 				}
 			}
 		}
 		return true
 	})
-	for _, foreign := range unresolved {
-		if foreign {
+	for ident, foreign := range unresolved {
+		if foreign && (!dot || !ident.IsExported()) {
 			return false
 		}
 	}
@@ -323,6 +325,25 @@ func keyed(typ ast.Expr) bool {
 	default:
 		return false
 	}
+}
+
+// codeIndented reports whether a line opens with CommonMark's four columns of indentation, counting tab stops.
+func codeIndented(line string) bool {
+	column := 0
+	for _, r := range line {
+		switch r {
+		case ' ':
+			column++
+		case '\t':
+			column += 4 - column%4
+		default:
+			return false
+		}
+		if column >= 4 {
+			return true
+		}
+	}
+	return false
 }
 
 // render replaces whole-line markers outside code fences and preserves the file's line endings.
@@ -350,7 +371,7 @@ func render(markdown []byte, docs packageDocs) ([]byte, error) {
 				fence = ""
 			}
 		}
-		if fence != "" || match != nil || strings.HasPrefix(content, "    ") || strings.HasPrefix(content, "\t") {
+		if fence != "" || match != nil || codeIndented(content) {
 			if names == nil {
 				fmt.Fprint(&result, line)
 			}

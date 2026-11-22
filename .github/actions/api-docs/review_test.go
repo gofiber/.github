@@ -130,6 +130,7 @@ func TestRenderMarkerLayout(t *testing.T) {
 		{name: "tilde fence", prefix: "~~~markdown\n```\n<!-- go:doc Missing -->\n<!-- /go:doc -->\n~~~\n"},
 		{name: "spaces", prefix: "    <!-- go:doc Missing -->\n    <!-- /go:doc -->\n"},
 		{name: "tabs", prefix: "\t<!-- go:doc Missing -->\n\t<!-- /go:doc -->\n"},
+		{name: "mixed", prefix: " \t<!-- go:doc Missing -->\n   \t<!-- /go:doc -->\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -191,7 +192,9 @@ func TestSelfContainedSelectors(t *testing.T) {
 		"import \"github.com/gofiber/fiber/v3\"\nfunc Example() { fiber.New() }":                                true,
 		"import f \"fmt\"\nfunc Example() { f.Println(1) }":                                                     true,
 		"import \"net/http\"\nfunc Example() { _ = http.MethodGet }\nvar helper = 1":                            true,
-		"import . \"fmt\"\nfunc Example() { Println(shared.Value) }":                                            true,
+		"import . \"fmt\"\nfunc Example() { Println(shared.Value) }":                                            false,
+		"import . \"fmt\"\nfunc Example() { Println(Sprint(1)) }":                                               true,
+		"func Example() { _ = map[string]int{key: 1} }\nconst key = \"x\"":                                      true,
 		"import \"fmt\"\nfunc Example() { fmt.Println(Config{Value: 1}) }\ntype Config struct{ Value int }":     true,
 		"func Example() { _ = map[string]int{value: 1} }":                                                       false,
 		"func Example() { _ = []string{index: \"a\"} }":                                                         false,
