@@ -1,0 +1,51 @@
+name: API docs
+description: >
+  Builds the genapidocs generator that lives next to this action.yml, puts it on
+  PATH, runs every `//go:generate genapidocs ...` directive in the selected
+  packages and fails when a generated Markdown block drifts from its Go source.
+  Go must already be set up by the caller: go/printer output follows the caller's
+  toolchain. File selection does not follow the caller: genapidocs always lists
+  packages as linux/amd64 with cgo on.
+
+inputs:
+  packages:
+    description: Package pattern passed to `go generate`.
+    required: false
+    default: ./...
+  docs:
+    description: Path checked for drift after generating, relative to the repository root.
+    required: false
+    default: docs
+
+runs:
+  using: composite
+  steps:
+    - name: Build genapidocs
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        bin="$RUNNER_TEMP/genapidocs-bin"
+        # the host build must not inherit the caller's target, or the binary will not run here
+        GOOS= GOARCH= CGO_ENABLED=0 go build -trimpath -o "$bin/genapidocs" .
+        echo "$bin" >> "$GITHUB_PATH"
+
+    - name: Regenerate API docs
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        read -ra pkgs <<< "$PACKAGES"
+        go generate -run genapidocs "${pkgs[@]}"
+
+    - name: Check for drift
+      shell: bash
+      env:
+        DOCS: ${{ inputs.docs }}
+      run: |
+        set -euo pipefail
+        if ! git diff --exit-code -- "$DOCS"; then
+          echo "::error::Generated API docs are out of date. Run 'go generate -run genapidocs ./...' and commit the result."
+          exit 1
+        fi
